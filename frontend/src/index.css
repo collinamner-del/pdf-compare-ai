@@ -52,13 +52,13 @@ html, body {
   margin-top: 4px;
 }
 
-/* Main Content - Narrower */
+/* Main Content - Wider */
 .upload-section {
   background: white;
   padding: 32px;
   margin: 32px auto;
   width: 100%;
-  max-width: 800px;
+  max-width: 1000px;
   border-radius: 8px;
   border: 1px solid #dadce0;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), 0 1px 2px rgba(0, 0, 0, 0.24);
@@ -184,7 +184,7 @@ html, body {
   border-radius: 4px;
   margin: 0 auto 16px;
   width: 100%;
-  max-width: 800px;
+  max-width: 1000px;
   border-left: 3px solid #c5221f;
   font-size: 13px;
 }
@@ -198,7 +198,7 @@ html, body {
   font-weight: 500;
   margin: 0 auto;
   width: 100%;
-  max-width: 800px;
+  max-width: 1000px;
 }
 
 /* Tabs */
@@ -207,7 +207,7 @@ html, body {
   gap: 0;
   margin: 24px auto 0;
   width: 100%;
-  max-width: 800px;
+  max-width: 1000px;
   border-bottom: 1px solid #dadce0;
   background: white;
 }
@@ -242,7 +242,7 @@ html, body {
   padding: 32px;
   margin: 0 auto 32px;
   width: 100%;
-  max-width: 800px;
+  max-width: 1000px;
   background: white;
   border-radius: 8px;
   border: 1px solid #dadce0;
@@ -326,12 +326,12 @@ html, body {
   color: #0d47a1;
 }
 
-.stat-card.status-removed {
+.stat-card.status-deleted {
   border-color: #ef9a9a;
   background: #ffebee;
 }
 
-.stat-card.status-removed .stat-value {
+.stat-card.status-deleted .stat-value {
   color: #c62828;
 }
 
@@ -345,7 +345,7 @@ html, body {
 .table-wrapper {
   overflow-x: auto;
   overflow-y: auto;
-  max-height: 600px;
+  max-height: 700px;
 }
 
 .comparison-table {
@@ -422,12 +422,12 @@ html, body {
 
 .cell-content {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace;
-  font-size: 13px;
+  font-size: 12px;
   color: #202124;
   background: #f8f9fa;
   padding: 8px 10px;
   border-radius: 4px;
-  max-width: 200px;
+  max-width: 320px;
   word-wrap: break-word;
   white-space: pre-wrap;
   overflow-x: auto;
@@ -448,7 +448,7 @@ html, body {
 
 .cell-status {
   font-weight: 600;
-  font-size: 12px;
+  font-size: 11px;
   text-transform: uppercase;
   min-width: 90px;
   padding: 6px 8px;
@@ -479,8 +479,8 @@ html, body {
 
 .cell-comments {
   color: #5f6368;
-  font-size: 13px;
-  max-width: 200px;
+  font-size: 12px;
+  max-width: 240px;
   min-width: 160px;
 }
 
@@ -498,7 +498,7 @@ html, body {
   padding: 32px;
   margin: 0 auto 32px;
   width: 100%;
-  max-width: 800px;
+  max-width: 1000px;
   background: white;
   border-radius: 8px;
   border: 1px solid #dadce0;
@@ -551,6 +551,15 @@ html, body {
   .button-group {
     flex-direction: column;
   }
+
+  .upload-section,
+  .report-section,
+  .summary-section,
+  .tabs,
+  .error-message,
+  .loading {
+    max-width: calc(100% - 64px);
+  }
 }
 
 @media (max-width: 768px) {
@@ -564,38 +573,27 @@ html, body {
 
   .upload-section,
   .report-section,
-  .summary-section,
-  .tabs,
-  .error-message,
-  .loading {
-    margin: 16px auto;
+  .summary-section {
+    padding: 20px;
     max-width: calc(100% - 32px);
   }
 
-  .upload-section {
-    padding: 20px;
-  }
-
-  .report-section,
-  .summary-section {
-    padding: 20px;
-  }
-
-  .stats-grid {
-    grid-template-columns: repeat(2, 1fr);
+  .button-group {
+    flex-direction: column;
   }
 
   .comparison-table {
-    font-size: 12px;
+    font-size: 11px;
   }
 
   .comparison-table th,
   .comparison-table td {
-    padding: 8px 10px;
+    padding: 6px 8px;
   }
 
   .cell-content {
-    max-width: 120px;
+    max-width: 150px;
+    font-size: 11px;
   }
 
   .cell-comments {
