@@ -2,56 +2,69 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import pdfplumber
 import difflib
-from openai import OpenAI
 import os
+from openai import OpenAI
 
 app = Flask(__name__)
 CORS(app)
 
-# OpenAI client - uses OPENAI_API_KEY environment variable automatically
-client = OpenAI()
+# Initialize OpenAI client
+try:
+    client = OpenAI()
+except Exception as e:
+    print(f"Warning: OpenAI client initialization: {e}")
+    client = None
 
 def extract_text(file):
     try:
         with pdfplumber.open(file) as pdf:
             text = ""
             for page in pdf.pages:
-                text += page.extract_text() + "\n"
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
         return text
     except Exception as e:
         raise Exception(f"Failed to extract text from PDF: {str(e)}")
 
 @app.route("/")
 def home():
-    return {"status": "API running"}
+    return jsonify({"status": "API running"})
 
 @app.route("/compare", methods=["POST"])
 def compare():
     try:
+        if 'file1' not in request.files or 'file2' not in request.files:
+            return jsonify({"error": "Both file1 and file2 required"}), 400
+        
         f1 = request.files["file1"]
         f2 = request.files["file2"]
         
         text1 = extract_text(f1)
         text2 = extract_text(f2)
         
-        # Generate diff
         differ = difflib.HtmlDiff()
         html = differ.make_file(text1.splitlines(), text2.splitlines())
         
-        return {"html": html}
+        return jsonify({"html": html})
     except Exception as e:
-        return {"error": str(e)}, 400
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/summary", methods=["POST"])
 def summary():
     try:
+        if not client:
+            return jsonify({"error": "OpenAI client not available"}), 500
+            
+        if 'file1' not in request.files or 'file2' not in request.files:
+            return jsonify({"error": "Both file1 and file2 required"}), 400
+        
         f1 = request.files["file1"]
         f2 = request.files["file2"]
         
         text1 = extract_text(f1)
         text2 = extract_text(f2)
         
-        # Use OpenAI to summarize differences
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[{
@@ -60,9 +73,10 @@ def summary():
             }]
         )
         
-        return {"summary": response.choices[0].message.content}
+        return jsonify({"summary": response.choices[0].message.content})
     except Exception as e:
-        return {"error": str(e)}, 400
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, debug=False)
