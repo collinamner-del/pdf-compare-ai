@@ -7,7 +7,7 @@
 html, body {
   height: 100%;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
-  background: #ffffff;
+  background: #f5f5f5;
   color: #202124;
   line-height: 1.6;
 }
@@ -52,11 +52,13 @@ html, body {
   margin-top: 4px;
 }
 
-/* Main Content */
+/* Main Content - Narrower */
 .upload-section {
   background: white;
   padding: 32px;
-  margin: 32px;
+  margin: 32px auto;
+  width: 100%;
+  max-width: 800px;
   border-radius: 8px;
   border: 1px solid #dadce0;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), 0 1px 2px rgba(0, 0, 0, 0.24);
@@ -66,7 +68,7 @@ html, body {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 32px;
-  margin-bottom: 32px;
+  margin-bottom: 28px;
 }
 
 .upload-group {
@@ -180,7 +182,9 @@ html, body {
   color: #c5221f;
   padding: 12px 16px;
   border-radius: 4px;
-  margin-bottom: 16px;
+  margin: 0 auto 16px;
+  width: 100%;
+  max-width: 800px;
   border-left: 3px solid #c5221f;
   font-size: 13px;
 }
@@ -192,13 +196,18 @@ html, body {
   font-size: 14px;
   color: #1e3a8a;
   font-weight: 500;
+  margin: 0 auto;
+  width: 100%;
+  max-width: 800px;
 }
 
 /* Tabs */
 .tabs {
   display: flex;
   gap: 0;
-  margin: 24px 32px 0;
+  margin: 24px auto 0;
+  width: 100%;
+  max-width: 800px;
   border-bottom: 1px solid #dadce0;
   background: white;
 }
@@ -231,7 +240,9 @@ html, body {
 /* Report Section */
 .report-section {
   padding: 32px;
-  margin: 0 32px 32px;
+  margin: 0 auto 32px;
+  width: 100%;
+  max-width: 800px;
   background: white;
   border-radius: 8px;
   border: 1px solid #dadce0;
@@ -241,6 +252,7 @@ html, body {
 /* Summary Stats */
 .summary-stats {
   margin-bottom: 32px;
+  display: none;
 }
 
 .summary-stats h2 {
@@ -341,6 +353,7 @@ html, body {
   border-collapse: collapse;
   font-size: 13px;
   background: white;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 
 .comparison-table thead {
@@ -351,14 +364,14 @@ html, body {
 }
 
 .comparison-table th {
-  padding: 12px 16px;
+  padding: 12px 14px;
   text-align: left;
-  font-weight: 500;
+  font-weight: 600;
   color: #202124;
   white-space: nowrap;
   border-bottom: 1px solid #dadce0;
   font-size: 12px;
-  letter-spacing: 0.2px;
+  letter-spacing: 0.3px;
 }
 
 .comparison-table tbody tr {
@@ -382,19 +395,20 @@ html, body {
   border-left: 3px solid #0d47a1;
 }
 
-.row-removed {
+.row-deleted {
   border-left: 3px solid #c62828;
 }
 
 .comparison-table td {
-  padding: 10px 16px;
+  padding: 10px 14px;
   word-break: break-word;
+  font-size: 13px;
 }
 
 .cell-row-id {
   font-weight: 600;
   color: #1e3a8a;
-  min-width: 60px;
+  min-width: 50px;
   text-align: center;
   font-size: 12px;
 }
@@ -402,18 +416,18 @@ html, body {
 .cell-tag {
   color: #5f6368;
   font-size: 12px;
-  min-width: 90px;
+  min-width: 80px;
   font-family: 'Courier New', monospace;
 }
 
 .cell-content {
-  font-family: 'Courier New', monospace;
-  font-size: 12px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace;
+  font-size: 13px;
   color: #202124;
   background: #f8f9fa;
   padding: 8px 10px;
   border-radius: 4px;
-  max-width: 280px;
+  max-width: 200px;
   word-wrap: break-word;
   white-space: pre-wrap;
   overflow-x: auto;
@@ -434,9 +448,9 @@ html, body {
 
 .cell-status {
   font-weight: 600;
-  font-size: 11px;
+  font-size: 12px;
   text-transform: uppercase;
-  min-width: 100px;
+  min-width: 90px;
   padding: 6px 8px;
   border-radius: 3px;
   text-align: center;
@@ -458,30 +472,33 @@ html, body {
   color: #0d47a1;
 }
 
-.status-removed {
+.status-deleted {
   background: #ffebee;
   color: #c62828;
 }
 
 .cell-comments {
   color: #5f6368;
-  font-size: 12px;
-  max-width: 240px;
-  min-width: 180px;
+  font-size: 13px;
+  max-width: 200px;
+  min-width: 160px;
 }
 
 .table-footer {
-  padding: 12px 16px;
+  padding: 12px 14px;
   background: #f8f9fa;
   border-top: 1px solid #dadce0;
   font-size: 12px;
   color: #5f6368;
+  display: none;
 }
 
 /* Summary Section */
 .summary-section {
   padding: 32px;
-  margin: 0 32px 32px;
+  margin: 0 auto 32px;
+  width: 100%;
+  max-width: 800px;
   background: white;
   border-radius: 8px;
   border: 1px solid #dadce0;
@@ -490,9 +507,9 @@ html, body {
 
 .summary-section h2 {
   font-size: 16px;
-  margin-bottom: 16px;
+  margin-bottom: 20px;
   color: #202124;
-  font-weight: 500;
+  font-weight: 600;
   letter-spacing: 0.2px;
   display: flex;
   align-items: center;
@@ -509,15 +526,16 @@ html, body {
 }
 
 .summary-content {
-  line-height: 1.7;
+  line-height: 1.8;
   color: #202124;
   font-size: 13px;
   white-space: pre-wrap;
   background: #f8f9fa;
-  padding: 16px;
+  padding: 20px;
   border-radius: 4px;
   border-left: 3px solid #1e3a8a;
-  font-family: 'Courier New', monospace;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  word-wrap: break-word;
 }
 
 #fileInput {
@@ -528,10 +546,6 @@ html, body {
 @media (max-width: 1024px) {
   .upload-row {
     grid-template-columns: 1fr;
-  }
-
-  .stats-grid {
-    grid-template-columns: repeat(3, 1fr);
   }
 
   .button-group {
@@ -550,25 +564,29 @@ html, body {
 
   .upload-section,
   .report-section,
-  .summary-section {
-    margin: 16px;
-    padding: 16px;
+  .summary-section,
+  .tabs,
+  .error-message,
+  .loading {
+    margin: 16px auto;
+    max-width: calc(100% - 32px);
   }
 
-  .tabs {
-    margin: 16px 16px 0;
+  .upload-section {
+    padding: 20px;
+  }
+
+  .report-section,
+  .summary-section {
+    padding: 20px;
   }
 
   .stats-grid {
     grid-template-columns: repeat(2, 1fr);
   }
 
-  .button-group {
-    flex-direction: column;
-  }
-
   .comparison-table {
-    font-size: 11px;
+    font-size: 12px;
   }
 
   .comparison-table th,
@@ -577,10 +595,10 @@ html, body {
   }
 
   .cell-content {
-    max-width: 150px;
+    max-width: 120px;
   }
 
   .cell-comments {
-    max-width: 120px;
+    max-width: 100px;
   }
 }
