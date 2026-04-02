@@ -4,7 +4,7 @@ import pdfplumber
 import requests
 import os
 import difflib
-from typing import List, Dict, Tuple
+from typing import List, Dict
 
 app = Flask(__name__)
 CORS(app)
@@ -36,7 +36,6 @@ def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
     
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == 'equal':
-            # No changes
             for i in range(i2 - i1):
                 rows.append({
                     "row_id": f"R{row_id}",
@@ -44,20 +43,17 @@ def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
                     "pdf_a_content": lines_a[i1 + i],
                     "pdf_b_content": lines_a[i1 + i],
                     "status": "NO CHANGE",
-                    "comments": "Content unchanged"
+                    "comments": "No changes"
                 })
                 row_id += 1
         
         elif tag == 'replace':
-            # Modified content
             max_lines = max(i2 - i1, j2 - j1)
             for i in range(max_lines):
                 a_line = lines_a[i1 + i] if i1 + i < i2 else ""
                 b_line = lines_b[j1 + i] if j1 + i < j2 else ""
                 
-                # Bold the changes in b_line
                 if a_line != b_line:
-                    # Find character-level differences
                     b_line_bold = highlight_differences(a_line, b_line)
                 else:
                     b_line_bold = b_line
@@ -75,28 +71,26 @@ def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
                 row_id += 1
         
         elif tag == 'delete':
-            # Removed from PDF A
             for i in range(i2 - i1):
                 rows.append({
                     "row_id": f"R{row_id}",
                     "tag": f"Line {i1 + i + 1}",
                     "pdf_a_content": lines_a[i1 + i],
-                    "pdf_b_content": "",
+                    "pdf_b_content": "[REMOVED]",
                     "status": "REMOVED",
-                    "comments": "Content removed in PDF B"
+                    "comments": "Content removed"
                 })
                 row_id += 1
         
         elif tag == 'insert':
-            # Added in PDF B
             for i in range(j2 - j1):
                 rows.append({
                     "row_id": f"R{row_id}",
-                    "tag": f"New Line {j1 + i + 1}",
+                    "tag": f"New Line",
                     "pdf_a_content": "",
                     "pdf_b_content": f"**{lines_b[j1 + i]}**",
                     "status": "ADDED",
-                    "comments": "New content added in PDF B"
+                    "comments": "New content"
                 })
                 row_id += 1
     
@@ -107,7 +101,6 @@ def highlight_differences(text_a: str, text_b: str) -> str:
     if not text_a or not text_b:
         return f"**{text_b}**"
     
-    # Character-level comparison
     matcher = difflib.SequenceMatcher(None, text_a, text_b)
     result = []
     
@@ -122,13 +115,12 @@ def highlight_differences(text_a: str, text_b: str) -> str:
 def generate_comment(text_a: str, text_b: str) -> str:
     """Generate plain-language comment about the change"""
     if not text_a:
-        return f"Added: {text_b[:50]}"
+        return f"Added: {text_b[:40]}"
     if not text_b:
-        return f"Removed: {text_a[:50]}"
+        return f"Removed: {text_a[:40]}"
     if text_a == text_b:
         return "No change"
-    
-    return f"Changed from '{text_a[:40]}' to '{text_b[:40]}'"
+    return f"Changed to: {text_b[:40]}"
 
 def generate_summary(rows: List[Dict]) -> Dict:
     """Generate summary statistics"""
@@ -142,9 +134,7 @@ def generate_summary(rows: List[Dict]) -> Dict:
         "no_change": statuses.get('NO CHANGE', 0),
         "added": statuses.get('ADDED', 0),
         "removed": statuses.get('REMOVED', 0),
-        "modified": statuses.get('MODIFIED', 0),
-        "moved": statuses.get('MOVED', 0),
-        "uncertain": statuses.get('UNCERTAIN', 0)
+        "modified": statuses.get('MODIFIED', 0)
     }
 
 @app.route("/")
@@ -163,14 +153,10 @@ def compare():
         text_a = extract_text(f1)
         text_b = extract_text(f2)
         
-        # Split into lines
         lines_a = split_into_lines(text_a)
         lines_b = split_into_lines(text_b)
         
-        # Identify changes
         comparison_rows = identify_changes(lines_a, lines_b)
-        
-        # Generate summary
         summary = generate_summary(comparison_rows)
         
         return jsonify({
@@ -200,6 +186,33 @@ def summary():
         text_a = extract_text(f1)
         text_b = extract_text(f2)
         
+        # QC Analyst Prompt
+        qc_prompt = f"""You are a Document QC Analyst and Proofreader. Your task is to compare these two documents at the word and sentence level with STRICT accuracy.
+
+DOCUMENT A (Original):
+{text_a[:3000]}
+
+DOCUMENT B (Revised):
+{text_b[:3000]}
+
+ANALYSIS INSTRUCTIONS:
+1. Compare word-by-word and sentence-by-sentence
+2. Use proofreader's markup:
+   - **bold** = modified words/numbers/units
+   - [REMOVED] = deleted content
+   - [ADDED] = new content
+   - [UNCERTAIN] = unclear OCR text
+3. Be specific about changes (e.g., "105g → 107g" not just "weight changed")
+4. Follow Document A's sentence order exactly
+5. Flag OCR uncertainties if found
+6. Provide exact counts at the end
+
+OUTPUT FORMAT:
+Start with specific differences in a concise list format (one line per difference).
+Then provide: Total changes: X | Modified: X | Added: X | Removed: X
+
+Be concise, professional, and precise. Focus only on actual differences."""
+
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
             "Content-Type": "application/json"
@@ -210,9 +223,11 @@ def summary():
             "messages": [
                 {
                     "role": "user",
-                    "content": f"Provide a professional summary of the key differences between these two documents:\n\nDocument A:\n{text_a[:2000]}\n\nDocument B:\n{text_b[:2000]}\n\nFocus on meaningful changes, additions, and removals."
+                    "content": qc_prompt
                 }
-            ]
+            ],
+            "temperature": 0.3,  # Lower temperature for more consistent, focused output
+            "max_tokens": 1500
         }
         
         response = requests.post(
