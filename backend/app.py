@@ -5,55 +5,211 @@ import requests
 import os
 import difflib
 import re
-from typing import List, Dict
+from typing import List, Dict, Tuple
+from collections import defaultdict
 
 app = Flask(__name__)
 CORS(app)
 
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
-def extract_text(file):
-    """Simple, proven text extraction"""
+def extract_text_with_columns(file) -> str:
+    """Extract text respecting column layout"""
     try:
         if hasattr(file, 'seek'):
             file.seek(0)
         
         with pdfplumber.open(file) as pdf:
-            text = ""
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
-        return text
+            all_text = ""
+            
+            for page_num, page in enumerate(pdf.pages):
+                # Extract words with coordinates
+                words = page.extract_words()
+                
+                if not words:
+                    # Fallback to simple extraction
+                    text = page.extract_text()
+                    if text:
+                        all_text += text + "\n"
+                    continue
+                
+                # Group words by Y position (same line/row)
+                lines = group_by_y_position(words)
+                
+                # Detect columns in each line
+                columns = detect_columns_from_gaps(lines)
+                
+                # Output text respecting columns
+                page_text = reconstruct_text_with_columns(columns)
+                all_text += page_text + "\n"
+            
+            return all_text
+    
     except Exception as e:
         raise Exception(f"Failed to extract text: {str(e)}")
 
-def split_into_sentences(text):
-    """Split text into sentences/blocks, keeping them together"""
-    # Split by paragraph breaks first
-    paragraphs = text.split('\n\n')
+def group_by_y_position(words, tolerance=3):
+    """Group words that are on the same Y line (accounting for slight variations)"""
+    lines = defaultdict(list)
     
-    sentences = []
-    for para in paragraphs:
-        if not para.strip():
+    for word in words:
+        # Round Y position to nearest tolerance (accounts for font size variations)
+        y_key = round(word['top'] / tolerance) * tolerance
+        lines[y_key].append(word)
+    
+    # Sort each line by X position (left to right)
+    for y_key in lines:
+        lines[y_key].sort(key=lambda w: w['x0'])
+    
+    # Return as list sorted by Y position (top to bottom)
+    return [lines[y] for y in sorted(lines.keys())]
+
+def detect_columns_from_gaps(lines, gap_threshold=20):
+    """
+    Detect column boundaries by finding large gaps between words on same line.
+    
+    If two words on the same line have a gap > gap_threshold, they're in different columns.
+    """
+    
+    # Find all X positions where we see consistent gaps
+    gap_positions = find_consistent_gaps(lines, gap_threshold)
+    
+    if not gap_positions:
+        # No columns detected, treat as single column
+        return [single_column_structure(lines)]
+    
+    # Create column boundaries
+    boundaries = [0] + sorted(gap_positions)
+    
+    # Group words into columns
+    columns = {i: [] for i in range(len(boundaries))}
+    
+    for line_words in lines:
+        for word in line_words:
+            # Determine which column this word belongs to
+            col_index = determine_column(word['x0'], boundaries)
+            columns[col_index].append(word)
+    
+    return columns_to_text_blocks(columns)
+
+def find_consistent_gaps(lines, threshold):
+    """Find gaps that appear consistently across multiple lines (column boundaries)"""
+    # Track all gaps across all lines
+    gap_positions = defaultdict(int)
+    
+    for line_words in lines:
+        if len(line_words) < 2:
             continue
         
-        # Within each paragraph, split by sentence-ending punctuation
-        # Keep punctuation with the sentence
-        sent_list = re.split(r'(?<=[.!?])\s+(?=[A-Z])', para.strip())
-        
-        for sent in sent_list:
-            sent = sent.strip()
-            if sent:
-                # Don't split very short text - keep it together
-                sentences.append(sent)
+        # Look at gaps between consecutive words in this line
+        for i in range(len(line_words) - 1):
+            word1 = line_words[i]
+            word2 = line_words[i + 1]
+            
+            gap = word2['x0'] - (word1['x1'])  # Space between end of word1 and start of word2
+            
+            if gap > threshold:
+                # This is a large gap - likely a column boundary
+                gap_x = round((word1['x1'] + word2['x0']) / 2)  # Midpoint of gap
+                gap_positions[gap_x] += 1
     
-    return sentences
+    # Only return gaps that appear in multiple lines (consistent column boundary)
+    # At least 2 lines should have this gap
+    consistent_gaps = [x for x, count in gap_positions.items() if count >= 2]
+    
+    return consistent_gaps
 
-def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
-    """Compare sentences and identify changes"""
+def determine_column(x_position, boundaries):
+    """Given X position and column boundaries, determine which column it's in"""
+    for i, boundary in enumerate(boundaries[1:]):
+        if x_position < boundary:
+            return i
+    return len(boundaries) - 1
+
+def single_column_structure(lines):
+    """Treat all text as single column"""
+    return {0: [word for line in lines for word in line]}
+
+def columns_to_text_blocks(columns):
+    """
+    Convert columns of words back into readable text blocks.
+    
+    Read each column top-to-bottom, then move to next column.
+    This preserves the layout structure.
+    """
+    text_blocks = []
+    
+    # Sort columns by X position (left to right)
+    sorted_columns = sorted(columns.items())
+    
+    for col_index, words_in_column in sorted_columns:
+        # Sort words in column by Y position (top to bottom)
+        words_in_column.sort(key=lambda w: w['top'])
+        
+        # Group words by line within column
+        column_lines = group_by_y_position(words_in_column, tolerance=3)
+        
+        # Convert to text
+        column_text = []
+        for line_words in column_lines:
+            line_text = ' '.join([w['text'] for w in line_words])
+            if line_text.strip():
+                column_text.append(line_text)
+        
+        # Join lines in column with newlines
+        if column_text:
+            text_blocks.append('\n'.join(column_text))
+    
+    # Join columns with a separator (indicates column break)
+    # Use multiple newlines to show column separation
+    return '\n\n'.join(text_blocks)
+
+def split_into_blocks(text):
+    """
+    Split text into meaningful blocks:
+    - Paragraphs (separated by blank lines)
+    - Sentences (ending with . ! ?)
+    - But preserve column structure
+    """
+    blocks = []
+    
+    # Split by multiple newlines first (column/section breaks)
+    sections = text.split('\n\n')
+    
+    for section in sections:
+        if not section.strip():
+            continue
+        
+        # Within each section, split by sentences
+        # But be careful with abbreviations and decimals
+        sentences = split_by_sentence(section)
+        blocks.extend(sentences)
+    
+    return blocks
+
+def split_by_sentence(text):
+    """Split text by sentence-ending punctuation, respecting abbreviations"""
+    if not text.strip():
+        return []
+    
+    # Use regex to split on . ! ? but not on abbreviations
+    # Simplified: split on period followed by space and capital letter
+    sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
+    
+    # Also split on double newlines within the text
+    result = []
+    for sent in sentences:
+        if '\n\n' in sent:
+            result.extend(sent.split('\n\n'))
+        else:
+            result.append(sent)
+    
+    return [s.strip() for s in result if s.strip()]
+
+def identify_changes(blocks_a: List[str], blocks_b: List[str]) -> List[Dict]:
+    """Compare blocks and identify changes"""
     rows = []
-    matcher = difflib.SequenceMatcher(None, lines_a, lines_b)
+    matcher = difflib.SequenceMatcher(None, blocks_a, blocks_b)
     
     row_id = 1
     
@@ -63,65 +219,70 @@ def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
                 rows.append({
                     "row_id": f"R{row_id}",
                     "tag": f"Block {i1 + i + 1}",
-                    "pdf_a_content": lines_a[i1 + i][:150],
-                    "pdf_b_content": lines_a[i1 + i][:150],
+                    "pdf_a_content": blocks_a[i1 + i][:150],
+                    "pdf_b_content": blocks_a[i1 + i][:150],
                     "status": "NO CHANGE",
                     "comments": "Unchanged"
                 })
                 row_id += 1
         
         elif tag == 'replace':
-            max_lines = max(i2 - i1, j2 - j1)
-            for i in range(max_lines):
-                a_line = lines_a[i1 + i] if i1 + i < i2 else ""
-                b_line = lines_b[j1 + i] if j1 + i < j2 else ""
+            max_blocks = max(i2 - i1, j2 - j1)
+            for i in range(max_blocks):
+                a_block = blocks_a[i1 + i] if i1 + i < i2 else ""
+                b_block = blocks_b[j1 + i] if j1 + i < j2 else ""
                 
-                # Clear DELETED indication
-                if a_line and not b_line:
+                if a_block and not b_block:
                     rows.append({
                         "row_id": f"R{row_id}",
                         "tag": f"Block {i1 + i + 1}",
-                        "pdf_a_content": a_line[:150],
+                        "pdf_a_content": a_block[:150],
                         "pdf_b_content": "❌ [DELETED]",
                         "status": "DELETED",
-                        "comments": "Content removed entirely"
+                        "comments": "Content removed"
                     })
-                    row_id += 1
                 
-                # ADDED indication
-                elif not a_line and b_line:
+                elif not a_block and b_block:
                     rows.append({
                         "row_id": f"R{row_id}",
                         "tag": f"Block New",
                         "pdf_a_content": "",
-                        "pdf_b_content": f"✅ **{b_line[:150]}**",
+                        "pdf_b_content": f"✅ **{b_block[:150]}**",
                         "status": "ADDED",
-                        "comments": "New content added"
+                        "comments": "New content"
                     })
-                    row_id += 1
                 
-                # MODIFIED
-                elif a_line and b_line and a_line != b_line:
-                    b_line_bold = highlight_differences(a_line, b_line)
+                elif a_block and b_block and a_block != b_block:
+                    b_bold = highlight_differences(a_block, b_block)
                     rows.append({
                         "row_id": f"R{row_id}",
                         "tag": f"Block {i1 + i + 1}",
-                        "pdf_a_content": a_line[:150],
-                        "pdf_b_content": b_line_bold[:150],
+                        "pdf_a_content": a_block[:150],
+                        "pdf_b_content": b_bold[:150],
                         "status": "MODIFIED",
-                        "comments": f"Changed"
+                        "comments": "Changed"
                     })
-                    row_id += 1
+                else:
+                    rows.append({
+                        "row_id": f"R{row_id}",
+                        "tag": f"Block {i1 + i + 1}",
+                        "pdf_a_content": a_block[:150],
+                        "pdf_b_content": a_block[:150],
+                        "status": "NO CHANGE",
+                        "comments": "Unchanged"
+                    })
+                
+                row_id += 1
         
         elif tag == 'delete':
             for i in range(i2 - i1):
                 rows.append({
                     "row_id": f"R{row_id}",
                     "tag": f"Block {i1 + i + 1}",
-                    "pdf_a_content": lines_a[i1 + i][:150],
+                    "pdf_a_content": blocks_a[i1 + i][:150],
                     "pdf_b_content": "❌ [DELETED]",
                     "status": "DELETED",
-                    "comments": "Content removed entirely"
+                    "comments": "Content removed"
                 })
                 row_id += 1
         
@@ -131,16 +292,16 @@ def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
                     "row_id": f"R{row_id}",
                     "tag": f"Block New",
                     "pdf_a_content": "",
-                    "pdf_b_content": f"✅ **{lines_b[j1 + i][:150]}**",
+                    "pdf_b_content": f"✅ **{blocks_b[j1 + i][:150]}**",
                     "status": "ADDED",
-                    "comments": "New content added"
+                    "comments": "New content"
                 })
                 row_id += 1
     
     return rows
 
 def highlight_differences(text_a: str, text_b: str) -> str:
-    """Bold only the changed parts"""
+    """Highlight changed parts with bold"""
     if not text_a or not text_b:
         return f"**{text_b}**"
     
@@ -155,16 +316,6 @@ def highlight_differences(text_a: str, text_b: str) -> str:
     
     return ''.join(result)
 
-def generate_comment(text_a: str, text_b: str) -> str:
-    """Generate plain-language comment"""
-    if not text_a:
-        return f"Added: {text_b[:40]}"
-    if not text_b:
-        return f"Deleted: {text_a[:40]}"
-    if text_a == text_b:
-        return "Unchanged"
-    return f"Modified"
-
 def generate_summary(rows: List[Dict]) -> Dict:
     """Generate summary statistics"""
     statuses = {}
@@ -173,7 +324,7 @@ def generate_summary(rows: List[Dict]) -> Dict:
         statuses[status] = statuses.get(status, 0) + 1
     
     return {
-        "total_rows": len(rows),
+        "total_blocks": len(rows),
         "no_change": statuses.get('NO CHANGE', 0),
         "added": statuses.get('ADDED', 0),
         "deleted": statuses.get('DELETED', 0),
@@ -182,7 +333,7 @@ def generate_summary(rows: List[Dict]) -> Dict:
 
 @app.route("/")
 def home():
-    return jsonify({"status": "API running - Sentence-Aware"})
+    return jsonify({"status": "API running - Column-Aware Extraction"})
 
 @app.route("/compare", methods=["POST"])
 def compare():
@@ -203,23 +354,24 @@ def compare():
         if not f2.filename.lower().endswith('.pdf'):
             return jsonify({"error": "File 2 must be a PDF"}), 400
         
-        text_a = extract_text(f1)
-        text_b = extract_text(f2)
+        # Use column-aware extraction
+        text_a = extract_text_with_columns(f1)
+        text_b = extract_text_with_columns(f2)
         
         if not text_a or not text_b:
             return jsonify({"error": "Could not extract text from PDFs"}), 400
         
-        # Use sentence-based splitting instead of line-based
-        lines_a = split_into_sentences(text_a)
-        lines_b = split_into_sentences(text_b)
+        # Split into meaningful blocks
+        blocks_a = split_into_blocks(text_a)
+        blocks_b = split_into_blocks(text_b)
         
-        comparison_rows = identify_changes(lines_a, lines_b)
+        comparison_rows = identify_changes(blocks_a, blocks_b)
         summary = generate_summary(comparison_rows)
         
         return jsonify({
             "report": {
                 "document_type": "pdf_comparison",
-                "purpose": "Sentence-aware document comparison",
+                "purpose": "Column-aware document comparison",
                 "comparison_table": comparison_rows,
                 "summary": summary
             }
@@ -250,18 +402,18 @@ def summary():
         if not f2.filename.lower().endswith('.pdf'):
             return jsonify({"error": "File 2 must be a PDF"}), 400
         
-        text_a = extract_text(f1)
-        text_b = extract_text(f2)
+        text_a = extract_text_with_columns(f1)
+        text_b = extract_text_with_columns(f2)
         
         if not text_a or not text_b:
             return jsonify({"error": "Could not extract text from PDFs"}), 400
         
-        lines_a = split_into_sentences(text_a)
-        lines_b = split_into_sentences(text_b)
+        blocks_a = split_into_blocks(text_a)
+        blocks_b = split_into_blocks(text_b)
         
-        comparison_rows = identify_changes(lines_a, lines_b)
+        comparison_rows = identify_changes(blocks_a, blocks_b)
         
-        # Build detailed changes list
+        # Build detailed changes
         important_changes = [r for r in comparison_rows if r.get('status') != 'NO CHANGE']
         
         changes_detail = []
@@ -277,27 +429,17 @@ def summary():
             elif status == 'MODIFIED':
                 changes_detail.append(f"{i}. [ ] PDF 1: \"{pdf1}\"   PDF 2: \"{pdf2}\"   ACTION: Verify")
         
-        changes_text = "\n".join(changes_detail) if changes_detail else "No significant changes detected"
+        changes_text = "\n".join(changes_detail) if changes_detail else "No significant changes"
         
-        # Improved AI prompt with checkbox format
         qc_prompt = f"""You are a QC analyst. Create a professional checklist of changes from PDF 1 (original) to PDF 2 (updated).
 
 CHANGES DETECTED:
 {changes_text}
 
-Format your response as a checklist. Each item should have:
-- A checkbox [ ]
-- PDF 1 content in quotes
-- PDF 2 content in quotes
-- Clear indication if DELETED with ❌ [DELETED]
-- ACTION field (Verify/Confirm/Check)
+Format as a checkbox list. Each item:
+[ ] PDF 1: "..."   PDF 2: "..."   ACTION: Verify
 
-Example format:
-[ ] 1. PDF 1: "Original text here"   PDF 2: "Updated text here"   ACTION: Verify
-
-[ ] 2. PDF 1: "Text to remove"   PDF 2: ❌ [DELETED]   ACTION: Confirm removal
-
-Include only actual changes. Keep professional tone."""
+Include only actual changes. Be specific and professional."""
 
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -306,12 +448,7 @@ Include only actual changes. Keep professional tone."""
         
         payload = {
             "model": "gpt-3.5-turbo",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": qc_prompt
-                }
-            ],
+            "messages": [{"role": "user", "content": qc_prompt}],
             "temperature": 0.3,
             "max_tokens": 2000
         }
