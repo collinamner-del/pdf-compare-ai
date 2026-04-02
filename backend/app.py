@@ -332,19 +332,31 @@ def compare():
         comparator = FuzzyComparator(threshold_show_change=85)
         comparison_rows, stats = comparator.compare(blocks_a, blocks_b)
         
+        # Filter out the similarity field for frontend compatibility
+        # Keep only fields the frontend expects
+        clean_rows = []
+        for row in comparison_rows:
+            clean_row = {
+                "row_id": row.get("row_id"),
+                "tag": row.get("tag"),
+                "pdf_a_content": row.get("pdf_a_content"),
+                "pdf_b_content": row.get("pdf_b_content"),
+                "status": row.get("status"),
+                "comments": row.get("comments")
+            }
+            clean_rows.append(clean_row)
+        
         return jsonify({
             "report": {
                 "document_type": "pdf_comparison",
                 "purpose": "Fuzzy match comparison - only shows real changes",
-                "comparison_table": comparison_rows,
-                "statistics": {
-                    "total_blocks": stats['total'],
-                    "identical": stats['identical'],
-                    "minor_variations": stats['minor_variation'],
+                "comparison_table": clean_rows,
+                "summary": {
+                    "total_rows": stats['total'],
+                    "no_change": stats['identical'],
                     "modified": stats['modified'],
                     "added": stats['added'],
-                    "deleted": stats['deleted'],
-                    "average_similarity": round(sum(stats['similarity_scores']) / len(stats['similarity_scores']), 1) if stats['similarity_scores'] else 0
+                    "deleted": stats['deleted']
                 }
             }
         })
@@ -383,7 +395,7 @@ def summary():
         comparator = FuzzyComparator(threshold_show_change=85)
         comparison_rows, stats = comparator.compare(blocks_a, blocks_b)
         
-        # Only include real changes (skip MINOR_CHANGE)
+        # Only include real changes (skip MINOR_CHANGE and NO CHANGE)
         important_changes = [r for r in comparison_rows 
                            if r.get('status') in ['MODIFIED', 'ADDED', 'DELETED']]
         
@@ -392,34 +404,25 @@ def summary():
             status = change.get('status', '')
             pdf1 = change.get('pdf_a_content', '')
             pdf2 = change.get('pdf_b_content', '').replace('**', '').replace('❌', '').replace('✅', '').strip()
-            similarity = change.get('similarity', 0)
             
             if status == 'DELETED':
                 changes_detail.append(f"{i}. [ ] PDF 1: \"{pdf1}\"   PDF 2: ❌ [DELETED]   ACTION: Verify")
             elif status == 'ADDED':
                 changes_detail.append(f"{i}. [ ] PDF 1: [NEW]   PDF 2: \"{pdf2}\"   ACTION: Verify")
             elif status == 'MODIFIED':
-                changes_detail.append(f"{i}. [ ] PDF 1: \"{pdf1}\"   PDF 2: \"{pdf2}\" ({similarity}% match)   ACTION: Verify")
+                changes_detail.append(f"{i}. [ ] PDF 1: \"{pdf1}\"   PDF 2: \"{pdf2}\"   ACTION: Verify")
         
         changes_text = "\n".join(changes_detail) if changes_detail else "No real changes detected"
         
-        qc_prompt = f"""Professional QC checklist. Only actual changes - fuzzy matched.
+        qc_prompt = f"""Professional QC checklist of actual changes between PDFs.
 
-KEY CHANGES:
-{changes_text}
+CHANGES FOUND:
+{changes_text if changes_detail else "No real changes detected"}
 
-Statistics:
-- Total blocks compared: {stats['total']}
-- Identical: {stats['identical']}
-- Minor variations: {stats['minor_variation']}
-- Real changes: {stats['modified']}
-- Added: {stats['added']}
-- Deleted: {stats['deleted']}
+Format response as a checkbox list:
+[ ] PDF 1: "old text"   PDF 2: "new text"   ACTION: Verify
 
-Format as checkbox list:
-[ ] PDF 1: "..."   PDF 2: "..."   ACTION: Verify
-
-Be specific and professional."""
+Keep professional and specific. Only include actual changes."""
 
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
