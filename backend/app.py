@@ -16,12 +16,19 @@ def safe_extract_text(file) -> List[str]:
     lines = []
     
     try:
+        # Make sure we're at the start of the file
+        if hasattr(file, 'seek'):
+            file.seek(0)
+        
         with pdfplumber.open(file) as pdf:
+            if not pdf.pages:
+                raise Exception("PDF has no pages")
+            
             for page_num, page in enumerate(pdf.pages):
                 try:
                     # Method 1: Try word-based extraction
                     words = page.extract_words()
-                    if words:
+                    if words and len(words) > 0:
                         sorted_words = sorted(words, key=lambda w: (round(w['top'] / 20) * 20, w['left']))
                         current_line = []
                         current_y = None
@@ -39,7 +46,7 @@ def safe_extract_text(file) -> List[str]:
                             lines.append(' '.join(current_line))
                     
                     # Method 2: Fallback to simple text extraction
-                    if not lines:
+                    if not lines or len([l for l in lines if l.strip()]) == 0:
                         text = page.extract_text()
                         if text:
                             for line in text.split('\n'):
@@ -49,6 +56,9 @@ def safe_extract_text(file) -> List[str]:
                 except Exception as e:
                     print(f"Error on page {page_num}: {str(e)}")
                     continue
+        
+        if not lines:
+            raise Exception("No text extracted from PDF")
         
         return [l.strip() for l in lines if l.strip()]
     
@@ -182,11 +192,28 @@ def home():
 @app.route("/compare", methods=["POST"])
 def compare():
     try:
+        # Check files exist
         if 'file1' not in request.files or 'file2' not in request.files:
-            return jsonify({"error": "Both PDF files required"}), 400
+            return jsonify({"error": "Both PDF files required. Please upload two files."}), 400
         
         f1 = request.files["file1"]
         f2 = request.files["file2"]
+        
+        # Check files aren't empty
+        if not f1 or not f1.filename:
+            return jsonify({"error": "File 1 is missing or invalid"}), 400
+        if not f2 or not f2.filename:
+            return jsonify({"error": "File 2 is missing or invalid"}), 400
+        
+        # Check file extensions
+        if not f1.filename.lower().endswith('.pdf'):
+            return jsonify({"error": "File 1 must be a PDF"}), 400
+        if not f2.filename.lower().endswith('.pdf'):
+            return jsonify({"error": "File 2 must be a PDF"}), 400
+        
+        # Seek to beginning (important for file handling)
+        f1.seek(0)
+        f2.seek(0)
         
         # Extract text
         lines_a = safe_extract_text(f1)
@@ -219,10 +246,26 @@ def summary():
             return jsonify({"error": "OpenAI API key not configured"}), 500
         
         if 'file1' not in request.files or 'file2' not in request.files:
-            return jsonify({"error": "Both files required"}), 400
+            return jsonify({"error": "Both PDF files required"}), 400
         
         f1 = request.files["file1"]
         f2 = request.files["file2"]
+        
+        # Check files aren't empty
+        if not f1 or not f1.filename:
+            return jsonify({"error": "File 1 is missing or invalid"}), 400
+        if not f2 or not f2.filename:
+            return jsonify({"error": "File 2 is missing or invalid"}), 400
+        
+        # Check file extensions
+        if not f1.filename.lower().endswith('.pdf'):
+            return jsonify({"error": "File 1 must be a PDF"}), 400
+        if not f2.filename.lower().endswith('.pdf'):
+            return jsonify({"error": "File 2 must be a PDF"}), 400
+        
+        # Seek to beginning
+        f1.seek(0)
+        f2.seek(0)
         
         # Extract text
         lines_a = safe_extract_text(f1)
