@@ -71,8 +71,8 @@ export default function App() {
         return "status-modified";
       case "ADDED":
         return "status-added";
-      case "REMOVED":
-        return "status-removed";
+      case "DELETED":
+        return "status-deleted";
       default:
         return "";
     }
@@ -117,7 +117,7 @@ export default function App() {
             Compare Documents
           </button>
           <button onClick={generateSummary} className="btn btn-secondary" disabled={loading}>
-            Generate QC Checklist
+            Generate AI QC Summary
           </button>
         </div>
       </div>
@@ -144,7 +144,7 @@ export default function App() {
               className={`tab ${activeTab === "summary" ? "active" : ""}`}
               onClick={() => setActiveTab("summary")}
             >
-              QC Checklist
+              AI QC Summary
             </button>
           )}
         </div>
@@ -153,7 +153,7 @@ export default function App() {
       {/* Comparison Report */}
       {report && activeTab === "comparison" && (
         <div className="report-section">
-          {/* Summary Statistics */}
+          {/* Summary Statistics - Hidden */}
           <div className="summary-stats">
             <h2>Report Summary</h2>
             <div className="stats-grid">
@@ -173,9 +173,9 @@ export default function App() {
                 <span className="stat-label">Added</span>
                 <span className="stat-value">{report.summary.added}</span>
               </div>
-              <div className="stat-card status-removed">
-                <span className="stat-label">Removed</span>
-                <span className="stat-value">{report.summary.removed}</span>
+              <div className="stat-card status-deleted">
+                <span className="stat-label">Deleted</span>
+                <span className="stat-value">{report.summary.deleted}</span>
               </div>
             </div>
           </div>
@@ -186,12 +186,12 @@ export default function App() {
               <table className="comparison-table">
                 <thead>
                   <tr>
-                    <th>Row ID</th>
-                    <th>Tag</th>
-                    <th>PDF A Content</th>
-                    <th>PDF B Content</th>
+                    <th>Row</th>
+                    <th>Location</th>
+                    <th>PDF #1</th>
+                    <th>PDF #2</th>
                     <th>Status</th>
-                    <th>Comments</th>
+                    <th>Action</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -214,23 +214,23 @@ export default function App() {
                       <td className={`cell-status ${getStatusColor(row.status)}`}>
                         {row.status}
                       </td>
-                      <td className="cell-comments">{row.comments}</td>
+                      <td className="cell-comments">Check</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
             <div className="table-footer">
-              {report.summary.total_rows} rows | {report.summary.modified} modified | {report.summary.added} added | {report.summary.removed} removed
+              {report.summary.total_rows} total items compared
             </div>
           </div>
         </div>
       )}
 
-      {/* QC Checklist */}
+      {/* AI QC Summary */}
       {summary && activeTab === "summary" && (
         <div className="summary-section">
-          <h2>QC Checklist & Analysis</h2>
+          <h2>AI QC Summary</h2>
           <div className="summary-content">
             {summary}
           </div>
