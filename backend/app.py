@@ -14,7 +14,7 @@ CORS(app)
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
 def extract_text_with_columns(file) -> str:
-    """Extract text respecting column layout"""
+    """Extract text respecting column layout, with fallback"""
     try:
         if hasattr(file, 'seek'):
             file.seek(0)
@@ -23,25 +23,42 @@ def extract_text_with_columns(file) -> str:
             all_text = ""
             
             for page_num, page in enumerate(pdf.pages):
-                # Extract words with coordinates
-                words = page.extract_words()
+                try:
+                    # Try smart column extraction
+                    words = page.extract_words()
+                    
+                    if words and len(words) > 5:
+                        try:
+                            # Group words by Y position
+                            lines = group_by_y_position(words)
+                            
+                            # Detect columns
+                            columns = detect_columns_from_gaps(lines)
+                            
+                            # Reconstruct text
+                            page_text = reconstruct_text_with_columns(columns)
+                            all_text += page_text + "\n"
+                        except Exception as e:
+                            # Column detection failed, fallback to simple
+                            print(f"Column detection failed on page {page_num}: {str(e)}")
+                            text = page.extract_text()
+                            if text:
+                                all_text += text + "\n"
+                    else:
+                        # No words or too few words, use simple extraction
+                        text = page.extract_text()
+                        if text:
+                            all_text += text + "\n"
                 
-                if not words:
-                    # Fallback to simple extraction
-                    text = page.extract_text()
-                    if text:
-                        all_text += text + "\n"
-                    continue
-                
-                # Group words by Y position (same line/row)
-                lines = group_by_y_position(words)
-                
-                # Detect columns in each line
-                columns = detect_columns_from_gaps(lines)
-                
-                # Output text respecting columns
-                page_text = reconstruct_text_with_columns(columns)
-                all_text += page_text + "\n"
+                except Exception as e:
+                    print(f"Page {page_num} extraction error: {str(e)}")
+                    # Final fallback
+                    try:
+                        text = page.extract_text()
+                        if text:
+                            all_text += text + "\n"
+                    except:
+                        continue
             
             return all_text
     
@@ -66,58 +83,85 @@ def group_by_y_position(words, tolerance=3):
 
 def detect_columns_from_gaps(lines, gap_threshold=20):
     """
-    Detect column boundaries by finding large gaps between words on same line.
-    
-    If two words on the same line have a gap > gap_threshold, they're in different columns.
+    Detect column boundaries by finding large gaps between words.
+    Simplified with better error handling.
     """
+    try:
+        # Find consistent gaps
+        gap_positions = find_consistent_gaps(lines, gap_threshold)
+        
+        if not gap_positions or len(gap_positions) == 0:
+            # No columns detected
+            all_words = [w for line in lines for w in line]
+            if all_words:
+                return {0: all_words}
+            return {}
+        
+        # Create column boundaries from gaps
+        boundaries = [0] + sorted(gap_positions) + [10000]
+        
+        # Group words into columns
+        columns = {}
+        col_index = 0
+        
+        for line_words in lines:
+            for word in line_words:
+                try:
+                    col = determine_column(word['x0'], boundaries)
+                    if col not in columns:
+                        columns[col] = []
+                    columns[col].append(word)
+                except Exception:
+                    if 0 not in columns:
+                        columns[0] = []
+                    columns[0].append(word)
+        
+        return columns_to_text_blocks(columns)
     
-    # Find all X positions where we see consistent gaps
-    gap_positions = find_consistent_gaps(lines, gap_threshold)
-    
-    if not gap_positions:
-        # No columns detected, treat as single column
-        return [single_column_structure(lines)]
-    
-    # Create column boundaries
-    boundaries = [0] + sorted(gap_positions)
-    
-    # Group words into columns
-    columns = {i: [] for i in range(len(boundaries))}
-    
-    for line_words in lines:
-        for word in line_words:
-            # Determine which column this word belongs to
-            col_index = determine_column(word['x0'], boundaries)
-            columns[col_index].append(word)
-    
-    return columns_to_text_blocks(columns)
+    except Exception as e:
+        print(f"Column detection error: {str(e)}")
+        # Return single column fallback
+        all_words = [w for line in lines for w in line]
+        return {0: all_words}
 
 def find_consistent_gaps(lines, threshold):
-    """Find gaps that appear consistently across multiple lines (column boundaries)"""
-    # Track all gaps across all lines
-    gap_positions = defaultdict(int)
-    
-    for line_words in lines:
-        if len(line_words) < 2:
-            continue
+    """Find gaps that appear consistently across multiple lines"""
+    try:
+        gap_positions = defaultdict(int)
         
-        # Look at gaps between consecutive words in this line
-        for i in range(len(line_words) - 1):
-            word1 = line_words[i]
-            word2 = line_words[i + 1]
+        for line_words in lines:
+            if len(line_words) < 2:
+                continue
             
-            gap = word2['x0'] - (word1['x1'])  # Space between end of word1 and start of word2
-            
-            if gap > threshold:
-                # This is a large gap - likely a column boundary
-                gap_x = round((word1['x1'] + word2['x0']) / 2)  # Midpoint of gap
-                gap_positions[gap_x] += 1
+            try:
+                # Look at gaps between consecutive words
+                for i in range(len(line_words) - 1):
+                    try:
+                        word1 = line_words[i]
+                        word2 = line_words[i + 1]
+                        
+                        # Calculate gap
+                        x1_end = word1.get('x1', word1.get('x0', 0))
+                        x2_start = word2.get('x0', 0)
+                        
+                        gap = x2_start - x1_end
+                        
+                        if gap > threshold:
+                            # Large gap found
+                            gap_x = round((x1_end + x2_start) / 2)
+                            gap_positions[gap_x] += 1
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+        
+        # Return gaps that appear in multiple lines
+        consistent = [x for x, count in gap_positions.items() if count >= 1]
+        return consistent
     
-    # Only return gaps that appear in multiple lines (consistent column boundary)
-    # At least 2 lines should have this gap
-    consistent_gaps = [x for x, count in gap_positions.items() if count >= 2]
-    
-    return consistent_gaps
+    except Exception as e:
+        print(f"Gap detection error: {str(e)}")
+        return []
 
 def determine_column(x_position, boundaries):
     """Given X position and column boundaries, determine which column it's in"""
@@ -131,38 +175,63 @@ def single_column_structure(lines):
     return {0: [word for line in lines for word in line]}
 
 def columns_to_text_blocks(columns):
-    """
-    Convert columns of words back into readable text blocks.
-    
-    Read each column top-to-bottom, then move to next column.
-    This preserves the layout structure.
-    """
-    text_blocks = []
-    
-    # Sort columns by X position (left to right)
-    sorted_columns = sorted(columns.items())
-    
-    for col_index, words_in_column in sorted_columns:
-        # Sort words in column by Y position (top to bottom)
-        words_in_column.sort(key=lambda w: w['top'])
+    """Convert columns of words back into readable text"""
+    try:
+        if not columns or not isinstance(columns, dict):
+            return ""
         
-        # Group words by line within column
-        column_lines = group_by_y_position(words_in_column, tolerance=3)
+        text_blocks = []
         
-        # Convert to text
-        column_text = []
-        for line_words in column_lines:
-            line_text = ' '.join([w['text'] for w in line_words])
-            if line_text.strip():
-                column_text.append(line_text)
+        # Sort columns by position
+        sorted_columns = sorted(columns.items())
         
-        # Join lines in column with newlines
-        if column_text:
-            text_blocks.append('\n'.join(column_text))
+        for col_index, words_in_column in sorted_columns:
+            if not words_in_column:
+                continue
+            
+            try:
+                # Sort words in column by Y position
+                sorted_words = sorted(words_in_column, key=lambda w: w.get('top', 0))
+                
+                # Group by line within column
+                column_lines = group_by_y_position(sorted_words, tolerance=3)
+                
+                # Convert to text
+                column_text = []
+                for line_words in column_lines:
+                    line_text = ' '.join([w.get('text', '') for w in line_words if w.get('text')])
+                    if line_text.strip():
+                        column_text.append(line_text)
+                
+                if column_text:
+                    text_blocks.append('\n'.join(column_text))
+            except Exception as e:
+                print(f"Column {col_index} processing error: {str(e)}")
+                continue
+        
+        # Join columns
+        if text_blocks:
+            return '\n\n'.join(text_blocks)
+        return ""
     
-    # Join columns with a separator (indicates column break)
-    # Use multiple newlines to show column separation
-    return '\n\n'.join(text_blocks)
+    except Exception as e:
+        print(f"Columns to text error: {str(e)}")
+        return ""
+
+def reconstruct_text_with_columns(columns):
+    """Reconstruct text from columns dictionary"""
+    try:
+        if not columns:
+            return ""
+        
+        if isinstance(columns, dict):
+            return columns_to_text_blocks(columns)
+        else:
+            # columns is already text
+            return str(columns)
+    except Exception as e:
+        print(f"Text reconstruction error: {str(e)}")
+        return ""
 
 def split_into_blocks(text):
     """
