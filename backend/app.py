@@ -237,25 +237,45 @@ def summary():
         # Find important changes
         important_changes = [r for r in comparison_rows if r.get('status') in ['MODIFIED', 'ADDED', 'DELETED']]
         
-        # Build summary text
-        changes_list = []
-        for change in important_changes[:20]:
-            changes_list.append(f"- {change.get('status')}: {change.get('comments')}")
+        # Build detailed changes list showing PDF 1 → PDF 2
+        changes_detail = []
+        for change in important_changes[:25]:
+            status = change.get('status', '')
+            pdf1 = change.get('pdf_a_content', '')
+            pdf2 = change.get('pdf_b_content', '').replace('**', '')
+            line = change.get('line', '')
+            
+            if status == 'MODIFIED':
+                changes_detail.append(f"Line {line}: PDF 1 '{pdf1}' → PDF 2 '{pdf2}'")
+            elif status == 'ADDED':
+                changes_detail.append(f"Line {line}: ADDED in PDF 2 '{pdf2}'")
+            elif status == 'DELETED':
+                changes_detail.append(f"Line {line}: REMOVED from PDF 2 (was '{pdf1}')")
         
-        changes_text = "\n".join(changes_list) if changes_list else "No significant changes detected"
+        changes_text = "\n".join(changes_detail) if changes_detail else "No significant changes detected"
         
-        # Create AI prompt
-        prompt = f"""Review these document changes and create a QC checklist.
+        # Create AI prompt - ask for specific format
+        prompt = f"""You are a QC analyst. Create a professional checklist of changes from PDF 1 (original) to PDF 2 (updated).
 
-CHANGES FOUND:
+CHANGES DETECTED:
 {changes_text}
 
-Create a professional QC summary with:
-1. Overview of changes
-2. Checklist items with checkboxes
-3. Action items
+Format your response EXACTLY like this example:
+Updates Required:
 
-Keep it professional and printable."""
+1. [ ] PDF 1: "Old text here"
+   PDF 2: "New text here"
+   ACTION: Verify/Check
+
+2. [ ] PDF 1: "Text removed"
+   PDF 2: [DELETED]
+   ACTION: Confirm removal
+
+3. [ ] PDF 1: [NEW]
+   PDF 2: "New text added"
+   ACTION: Verify
+
+Include only actual changes. Be specific with exact text. Keep professional tone."""
         
         # Call OpenAI
         headers = {
