@@ -4,189 +4,340 @@ import pdfplumber
 import requests
 import os
 import difflib
-from typing import List, Dict, Tuple
+import re
+from typing import List, Dict, Tuple, Set
+from collections import defaultdict
 
 app = Flask(__name__)
 CORS(app)
 
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
-def extract_text_with_regions(file):
-    """Extract text while preserving spatial information and grouping"""
+# Common packaging section headers
+SECTION_KEYWORDS = {
+    'INGREDIENTS': r'ingredient|composition|constituents',
+    'NUTRITION': r'nutrition|nutritional|per 100|energy|fat|protein|carbohydrate',
+    'ALLERGENS': r'allerg|contain|may contain|traces?|gluten|dairy|nuts|peanuts',
+    'STORAGE': r'stor|keep|temperature|fridge|freezer|shelf life|best before|use by',
+    'INSTRUCTIONS': r'instruction|direction|preparation|how to|method|cook|serving',
+    'WARNINGS': r'warning|caution|danger|risk|contact|medical|poison',
+    'COMPANY': r'made by|produced by|manufacturer|company|address|contact'
+}
+
+class TextProcessor:
+    """Intelligent text processing with OCR awareness"""
+    
+    @staticmethod
+    def normalize_text(text: str) -> str:
+        """Normalize text for better comparison"""
+        # Remove extra whitespace but preserve structure
+        text = ' '.join(text.split())
+        # Normalize common OCR errors
+        text = text.replace('l3', '13')  # Common OCR error
+        text = text.replace('O0', '00')  # Zero vs O
+        text = text.replace('S5', '55')  # S vs 5
+        return text.strip()
+    
+    @staticmethod
+    def detect_data_type(text: str) -> str:
+        """Detect what type of data this is"""
+        text = text.strip()
+        
+        if re.match(r'^\d+([.,]\d+)?\s*(g|kg|mg|ml|l|oz|lb)$', text, re.I):
+            return 'WEIGHT'
+        elif re.match(r'^\d+([.,]\d+)?%$', text):
+            return 'PERCENTAGE'
+        elif re.match(r'^\d+([.,]\d+)?\s*(kcal|kj|cal)', text, re.I):
+            return 'ENERGY'
+        elif re.match(r'^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$', text):
+            return 'DATE'
+        elif re.match(r'^[0-9]{13}$', text):
+            return 'BARCODE'
+        elif text.lower() in ['may contain', 'contains', 'allergen', 'warning']:
+            return 'ALLERGEN'
+        elif any(keyword in text.lower() for keyword in ['°c', 'fridge', 'freeze', 'cool']):
+            return 'TEMPERATURE'
+        else:
+            return 'TEXT'
+    
+    @staticmethod
+    def extract_sections(lines: List[str]) -> Dict[str, List[str]]:
+        """Intelligently group text into sections"""
+        sections = defaultdict(list)
+        current_section = 'GENERAL'
+        
+        for line in lines:
+            if not line.strip():
+                continue
+            
+            # Check if this line is a section header
+            line_lower = line.lower()
+            for section_name, pattern in SECTION_KEYWORDS.items():
+                if re.search(pattern, line_lower):
+                    current_section = section_name
+                    break
+            
+            sections[current_section].append(line)
+        
+        return dict(sections)
+
+class SmartComparator:
+    """Intelligent comparison engine"""
+    
+    @staticmethod
+    def fuzzy_match(text_a: str, text_b: str, threshold: float = 0.85) -> Tuple[bool, float]:
+        """Fuzzy matching for similar text"""
+        ratio = difflib.SequenceMatcher(None, text_a.lower(), text_b.lower()).ratio()
+        return ratio >= threshold, ratio
+    
+    @staticmethod
+    def is_significant_change(original: str, updated: str, data_type: str) -> bool:
+        """Determine if a change is significant"""
+        # All allergen changes are critical
+        if data_type == 'ALLERGEN':
+            return True
+        
+        # Numbers - flag if change is >5%
+        if data_type in ['WEIGHT', 'PERCENTAGE', 'ENERGY']:
+            try:
+                orig_num = float(re.findall(r'\d+(?:[.,]\d+)?', original)[0].replace(',', '.'))
+                upd_num = float(re.findall(r'\d+(?:[.,]\d+)?', updated)[0].replace(',', '.'))
+                percent_change = abs(upd_num - orig_num) / orig_num * 100
+                return percent_change > 5
+            except:
+                return True
+        
+        # Default: all changes are significant
+        return True
+    
+    @staticmethod
+    def smart_compare_lines(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
+        """Compare with intelligence"""
+        processor = TextProcessor()
+        rows = []
+        
+        # Extract sections for better organization
+        sections_a = processor.extract_sections(lines_a)
+        sections_b = processor.extract_sections(lines_b)
+        
+        all_sections = set(sections_a.keys()) | set(sections_b.keys())
+        row_id = 1
+        
+        for section in sorted(all_sections):
+            section_lines_a = sections_a.get(section, [])
+            section_lines_b = sections_b.get(section, [])
+            
+            matcher = difflib.SequenceMatcher(None, section_lines_a, section_lines_b)
+            
+            for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                if tag == 'equal':
+                    for i in range(i2 - i1):
+                        rows.append({
+                            "row_id": f"R{row_id}",
+                            "tag": section,
+                            "line": f"Line {i1 + i + 1}",
+                            "pdf_a_content": processor.normalize_text(section_lines_a[i1 + i])[:120],
+                            "pdf_b_content": processor.normalize_text(section_lines_a[i1 + i])[:120],
+                            "data_type": processor.detect_data_type(section_lines_a[i1 + i]),
+                            "status": "NO CHANGE",
+                            "significance": "low",
+                            "comments": "Unchanged"
+                        })
+                        row_id += 1
+                
+                elif tag == 'replace':
+                    max_lines = max(i2 - i1, j2 - j1)
+                    for i in range(max_lines):
+                        a_line = section_lines_a[i1 + i] if i1 + i < i2 else ""
+                        b_line = section_lines_b[j1 + i] if j1 + i < j2 else ""
+                        
+                        a_norm = processor.normalize_text(a_line)
+                        b_norm = processor.normalize_text(b_line)
+                        
+                        if a_norm != b_norm:
+                            # Try fuzzy match first
+                            is_similar, similarity = SmartComparator.fuzzy_match(a_norm, b_norm)
+                            
+                            if is_similar:
+                                status = "MINOR_VARIATION"
+                                b_display = b_norm
+                            else:
+                                status = "MODIFIED"
+                                b_display = SmartComparator.highlight_differences(a_norm, b_norm)
+                            
+                            data_type = processor.detect_data_type(a_norm or b_norm)
+                            is_significant = SmartComparator.is_significant_change(a_norm, b_norm, data_type)
+                            
+                            rows.append({
+                                "row_id": f"R{row_id}",
+                                "tag": section,
+                                "line": f"Line {i1 + i + 1}",
+                                "pdf_a_content": a_norm[:120],
+                                "pdf_b_content": b_display[:120],
+                                "data_type": data_type,
+                                "status": status,
+                                "significance": "high" if is_significant else "low",
+                                "comments": SmartComparator.generate_smart_comment(a_norm, b_norm, data_type)
+                            })
+                            row_id += 1
+                        else:
+                            rows.append({
+                                "row_id": f"R{row_id}",
+                                "tag": section,
+                                "line": f"Line {i1 + i + 1}",
+                                "pdf_a_content": a_norm[:120],
+                                "pdf_b_content": a_norm[:120],
+                                "data_type": processor.detect_data_type(a_norm),
+                                "status": "NO CHANGE",
+                                "significance": "low",
+                                "comments": "Unchanged"
+                            })
+                            row_id += 1
+                
+                elif tag == 'delete':
+                    for i in range(i2 - i1):
+                        line = section_lines_a[i1 + i]
+                        data_type = processor.detect_data_type(line)
+                        
+                        rows.append({
+                            "row_id": f"R{row_id}",
+                            "tag": section,
+                            "line": f"Line {i1 + i + 1}",
+                            "pdf_a_content": processor.normalize_text(line)[:120],
+                            "pdf_b_content": "[DELETED]",
+                            "data_type": data_type,
+                            "status": "DELETED",
+                            "significance": "high" if data_type in ['ALLERGEN', 'WEIGHT', 'ENERGY'] else "medium",
+                            "comments": f"Deleted {data_type.lower()}"
+                        })
+                        row_id += 1
+                
+                elif tag == 'insert':
+                    for i in range(j2 - j1):
+                        line = section_lines_b[j1 + i]
+                        data_type = processor.detect_data_type(line)
+                        
+                        rows.append({
+                            "row_id": f"R{row_id}",
+                            "tag": section,
+                            "line": f"New Line",
+                            "pdf_a_content": "",
+                            "pdf_b_content": f"**{processor.normalize_text(line)[:120]}**",
+                            "data_type": data_type,
+                            "status": "ADDED",
+                            "significance": "high" if data_type in ['ALLERGEN', 'WEIGHT', 'ENERGY'] else "medium",
+                            "comments": f"Added {data_type.lower()}"
+                        })
+                        row_id += 1
+        
+        return rows
+    
+    @staticmethod
+    def highlight_differences(text_a: str, text_b: str) -> str:
+        """Highlight only changed parts"""
+        if not text_a or not text_b:
+            return f"**{text_b}**"
+        
+        matcher = difflib.SequenceMatcher(None, text_a, text_b)
+        result = []
+        
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == 'equal':
+                result.append(text_b[j1:j2])
+            elif tag in ['replace', 'insert']:
+                result.append(f"**{text_b[j1:j2]}**")
+        
+        return ''.join(result)
+    
+    @staticmethod
+    def generate_smart_comment(text_a: str, text_b: str, data_type: str) -> str:
+        """Generate intelligent comments"""
+        if data_type == 'PERCENTAGE':
+            try:
+                a_val = float(re.findall(r'\d+(?:[.,]\d+)?', text_a)[0].replace(',', '.'))
+                b_val = float(re.findall(r'\d+(?:[.,]\d+)?', text_b)[0].replace(',', '.'))
+                change = b_val - a_val
+                return f"{data_type}: {a_val}% to {b_val}% (change: {change:+.1f}%)"
+            except:
+                return f"{data_type} modified"
+        
+        elif data_type == 'WEIGHT':
+            return f"{data_type}: {text_a} to {text_b}"
+        
+        elif data_type == 'ALLERGEN':
+            return f"⚠ CRITICAL - Allergen info changed"
+        
+        elif data_type == 'DATE':
+            return f"Date: {text_a} to {text_b}"
+        
+        else:
+            return f"{data_type} modified"
+
+def extract_enhanced_text(file) -> List[str]:
+    """Extract text with all enhancements"""
     try:
         with pdfplumber.open(file) as pdf:
-            text_regions = []
+            all_lines = []
             
-            for page_num, page in enumerate(pdf.pages):
-                # Get text with spatial info
-                text_dict = page.extract_text_simple()
-                
-                # Also try to extract tables (nutrition tables, ingredient lists)
+            for page in pdf.pages:
+                # Try to extract tables first
                 tables = page.extract_tables()
+                if tables:
+                    for table in tables:
+                        for row in table:
+                            row_text = ' | '.join([str(cell).strip() if cell else '' for cell in row])
+                            if row_text.strip():
+                                all_lines.append(row_text)
                 
-                # Extract words with bounding boxes
+                # Then extract regular text with spatial awareness
                 words = page.extract_words()
-                
                 if words:
-                    # Group words into logical sections based on position
-                    # Sort by Y position (top to bottom), then X position (left to right)
                     sorted_words = sorted(words, key=lambda w: (round(w['top'] / 20) * 20, w['left']))
                     
                     current_line = []
                     current_y = None
                     
                     for word in sorted_words:
-                        word_y = round(word['top'] / 20) * 20  # Group words on same line
+                        word_y = round(word['top'] / 20) * 20
                         
-                        # If we moved to a new line, save the current line
                         if current_y is not None and word_y != current_y:
                             if current_line:
-                                text_regions.append(' '.join(current_line).strip())
+                                all_lines.append(' '.join(current_line).strip())
                             current_line = []
                         
                         current_line.append(word['text'])
                         current_y = word_y
                     
-                    # Add final line
                     if current_line:
-                        text_regions.append(' '.join(current_line).strip())
-                
-                # Add tables as structured text
-                if tables:
-                    for table in tables:
-                        for row in table:
-                            row_text = ' | '.join([str(cell) if cell else '' for cell in row])
-                            if row_text.strip():
-                                text_regions.append(row_text)
-                
-                # Fallback to simple extraction if regions are empty
-                if not text_regions:
-                    simple_text = page.extract_text()
-                    if simple_text:
-                        text_regions.extend(simple_text.split('\n'))
+                        all_lines.append(' '.join(current_line).strip())
             
-            # Remove empty lines
-            text_regions = [line.strip() for line in text_regions if line.strip()]
-            return text_regions
+            return [line for line in all_lines if line]
     
     except Exception as e:
-        raise Exception(f"Failed to extract text: {str(e)}")
-
-def smart_compare_lines(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
-    """Smart comparison that groups related changes"""
-    rows = []
-    matcher = difflib.SequenceMatcher(None, lines_a, lines_b)
-    
-    row_id = 1
-    
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == 'equal':
-            for i in range(i2 - i1):
-                rows.append({
-                    "row_id": f"R{row_id}",
-                    "tag": f"Line {i1 + i + 1}",
-                    "pdf_a_content": lines_a[i1 + i][:100],
-                    "pdf_b_content": lines_a[i1 + i][:100],
-                    "status": "NO CHANGE",
-                    "comments": "Unchanged"
-                })
-                row_id += 1
-        
-        elif tag == 'replace':
-            max_lines = max(i2 - i1, j2 - j1)
-            for i in range(max_lines):
-                a_line = lines_a[i1 + i] if i1 + i < i2 else ""
-                b_line = lines_b[j1 + i] if j1 + i < j2 else ""
-                
-                if a_line != b_line:
-                    b_line_bold = highlight_differences(a_line, b_line)
-                    status = "MODIFIED"
-                else:
-                    b_line_bold = b_line
-                    status = "NO CHANGE"
-                
-                comment = generate_comment(a_line, b_line)
-                
-                rows.append({
-                    "row_id": f"R{row_id}",
-                    "tag": f"Line {i1 + i + 1}",
-                    "pdf_a_content": a_line[:100],
-                    "pdf_b_content": b_line_bold[:100],
-                    "status": status,
-                    "comments": comment
-                })
-                row_id += 1
-        
-        elif tag == 'delete':
-            for i in range(i2 - i1):
-                rows.append({
-                    "row_id": f"R{row_id}",
-                    "tag": f"Line {i1 + i + 1}",
-                    "pdf_a_content": lines_a[i1 + i][:100],
-                    "pdf_b_content": "[DELETED]",
-                    "status": "DELETED",
-                    "comments": "Content removed"
-                })
-                row_id += 1
-        
-        elif tag == 'insert':
-            for i in range(j2 - j1):
-                rows.append({
-                    "row_id": f"R{row_id}",
-                    "tag": f"New Line",
-                    "pdf_a_content": "",
-                    "pdf_b_content": f"**{lines_b[j1 + i][:100]}**",
-                    "status": "ADDED",
-                    "comments": "New content"
-                })
-                row_id += 1
-    
-    return rows
-
-def highlight_differences(text_a: str, text_b: str) -> str:
-    """Bold only the changed parts"""
-    if not text_a or not text_b:
-        return f"**{text_b}**"
-    
-    matcher = difflib.SequenceMatcher(None, text_a, text_b)
-    result = []
-    
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == 'equal':
-            result.append(text_b[j1:j2])
-        elif tag in ['replace', 'insert']:
-            result.append(f"**{text_b[j1:j2]}**")
-    
-    return ''.join(result)
-
-def generate_comment(text_a: str, text_b: str) -> str:
-    """Generate brief comment about the change"""
-    if not text_a:
-        return f"Added: {text_b[:35]}"
-    if not text_b:
-        return f"Deleted: {text_a[:35]}"
-    if text_a == text_b:
-        return "Unchanged"
-    return f"Modified: {text_a[:30]} to {text_b[:30]}"
+        raise Exception(f"Text extraction failed: {str(e)}")
 
 def generate_summary(rows: List[Dict]) -> Dict:
-    """Generate summary statistics"""
-    statuses = {}
+    """Generate comprehensive summary"""
+    statuses = defaultdict(int)
+    significance_counts = defaultdict(int)
+    data_types = defaultdict(int)
+    
     for row in rows:
-        status = row['status']
-        statuses[status] = statuses.get(status, 0) + 1
+        statuses[row['status']] += 1
+        significance_counts[row['significance']] += 1
+        data_types[row['data_type']] += 1
     
     return {
         "total_rows": len(rows),
-        "no_change": statuses.get('NO CHANGE', 0),
-        "added": statuses.get('ADDED', 0),
-        "deleted": statuses.get('DELETED', 0),
-        "modified": statuses.get('MODIFIED', 0)
+        "by_status": dict(statuses),
+        "by_significance": dict(significance_counts),
+        "by_data_type": dict(data_types),
+        "critical_changes": sum(1 for r in rows if r.get('significance') == 'high' and r['status'] != 'NO CHANGE')
     }
 
 @app.route("/")
 def home():
-    return jsonify({"status": "API running"})
+    return jsonify({"status": "API running - Enhanced OCR v2"})
 
 @app.route("/compare", methods=["POST"])
 def compare():
@@ -197,16 +348,16 @@ def compare():
         f1 = request.files["file1"]
         f2 = request.files["file2"]
         
-        lines_a = extract_text_with_regions(f1)
-        lines_b = extract_text_with_regions(f2)
+        lines_a = extract_enhanced_text(f1)
+        lines_b = extract_enhanced_text(f2)
         
-        comparison_rows = smart_compare_lines(lines_a, lines_b)
+        comparison_rows = SmartComparator.smart_compare_lines(lines_a, lines_b)
         summary = generate_summary(comparison_rows)
         
         return jsonify({
             "report": {
                 "document_type": "pdf_comparison",
-                "purpose": "Smart region-based comparison of PDF A vs PDF B",
+                "purpose": "Intelligent section-based comparison with data typing",
                 "comparison_table": comparison_rows,
                 "summary": summary
             }
@@ -227,48 +378,45 @@ def summary():
         f1 = request.files["file1"]
         f2 = request.files["file2"]
         
-        lines_a = extract_text_with_regions(f1)
-        lines_b = extract_text_with_regions(f2)
+        lines_a = extract_enhanced_text(f1)
+        lines_b = extract_enhanced_text(f2)
         
-        comparison_rows = smart_compare_lines(lines_a, lines_b)
+        comparison_rows = SmartComparator.smart_compare_lines(lines_a, lines_b)
+        summary_data = generate_summary(comparison_rows)
         
-        # Build change summary
-        changes_list = []
-        for row in comparison_rows:
-            if row['status'] != 'NO CHANGE':
-                changes_list.append({
-                    'type': row['status'],
-                    'location': row['tag'],
-                    'original': row['pdf_a_content'][:50],
-                    'updated': row['pdf_b_content'][:50],
-                    'comment': row['comments']
-                })
+        # Build intelligent summary for AI
+        critical_changes = [r for r in comparison_rows if r.get('significance') == 'high' and r['status'] != 'NO CHANGE']
+        medium_changes = [r for r in comparison_rows if r.get('significance') == 'medium' and r['status'] != 'NO CHANGE']
+        minor_changes = [r for r in comparison_rows if r['status'] in ['MINOR_VARIATION', 'NO CHANGE']]
         
-        changes_text = ""
-        if changes_list:
-            for change in changes_list:
-                changes_text += f"- {change['type']}: {change['comment']}\n"
+        changes_text = "CRITICAL CHANGES:\n"
+        for change in critical_changes[:10]:
+            changes_text += f"- [{change['data_type']}] {change['comments']}\n"
         
-        qc_prompt = f"""You are a Document Quality Control Assistant reviewing food packaging updates.
+        changes_text += "\nMEDIUM CHANGES:\n"
+        for change in medium_changes[:10]:
+            changes_text += f"- [{change['data_type']}] {change['comments']}\n"
+        
+        qc_prompt = f"""You are a Food Packaging QC Expert reviewing document changes.
 
-Original Packaging (PDF 1):
-{chr(10).join(lines_a[:50])}
+CRITICAL CHANGES (High Priority):
+{changes_text}
 
-Updated Packaging (PDF 2):
-{chr(10).join(lines_b[:50])}
+SUMMARY STATISTICS:
+- Total sections reviewed: {len(summary_data.get('by_status', {}))}
+- Critical changes found: {summary_data.get('critical_changes', 0)}
+- Data types affected: {', '.join(summary_data.get('by_data_type', {}).keys())}
 
-Changes Found:
-{changes_text if changes_text else 'No changes detected'}
-
-TASK: Write a clear, friendly QC summary for the quality control team.
+TASK: Create a focused, professional QC summary for immediate review.
 
 Include:
-1. Brief overview of changes
-2. List each specific change with exact values (one per line with checkbox)
-3. Areas that need verification
-4. Any regulatory or compliance notes
+1. Executive summary of critical changes
+2. Organized by section (ALLERGENS, NUTRITION, INGREDIENTS, etc.)
+3. Checkboxes for each item to verify
+4. Any compliance or safety concerns
+5. Action items
 
-Be specific with numbers and exact text. Use simple language. Format for printing."""
+Be concise, professional, and emphasize critical changes. Format for printing and team review."""
 
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -278,8 +426,8 @@ Be specific with numbers and exact text. Use simple language. Format for printin
         payload = {
             "model": "gpt-3.5-turbo",
             "messages": [{"role": "user", "content": qc_prompt}],
-            "temperature": 0.3,
-            "max_tokens": 1800
+            "temperature": 0.2,
+            "max_tokens": 2000
         }
         
         response = requests.post(
