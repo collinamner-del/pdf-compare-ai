@@ -25,7 +25,7 @@ def extract_text(file):
 
 def split_into_lines(text):
     """Split text into lines, preserving structure"""
-    return text.split('\n')
+    return [line for line in text.split('\n')]
 
 def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
     """Compare two sets of lines and identify changes"""
@@ -43,7 +43,7 @@ def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
                     "pdf_a_content": lines_a[i1 + i],
                     "pdf_b_content": lines_a[i1 + i],
                     "status": "NO CHANGE",
-                    "comments": "No changes"
+                    "comments": "Content unchanged"
                 })
                 row_id += 1
         
@@ -78,7 +78,7 @@ def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
                     "pdf_a_content": lines_a[i1 + i],
                     "pdf_b_content": "[REMOVED]",
                     "status": "REMOVED",
-                    "comments": "Content removed"
+                    "comments": "Content removed in PDF B"
                 })
                 row_id += 1
         
@@ -90,7 +90,7 @@ def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
                     "pdf_a_content": "",
                     "pdf_b_content": f"**{lines_b[j1 + i]}**",
                     "status": "ADDED",
-                    "comments": "New content"
+                    "comments": "New content added in PDF B"
                 })
                 row_id += 1
     
@@ -120,7 +120,7 @@ def generate_comment(text_a: str, text_b: str) -> str:
         return f"Removed: {text_a[:40]}"
     if text_a == text_b:
         return "No change"
-    return f"Changed to: {text_b[:40]}"
+    return f"Modified: {text_a[:35]} → {text_b[:35]}"
 
 def generate_summary(rows: List[Dict]) -> Dict:
     """Generate summary statistics"""
@@ -162,7 +162,7 @@ def compare():
         return jsonify({
             "report": {
                 "document_type": "pdf_comparison",
-                "purpose": f"Line-by-line comparison of PDF A vs PDF B",
+                "purpose": "Line-by-line comparison of PDF A vs PDF B",
                 "comparison_table": comparison_rows,
                 "summary": summary
             }
@@ -186,32 +186,51 @@ def summary():
         text_a = extract_text(f1)
         text_b = extract_text(f2)
         
-        # QC Analyst Prompt
-        qc_prompt = f"""You are a Document QC Analyst and Proofreader. Your task is to compare these two documents at the word and sentence level with STRICT accuracy.
+        lines_a = split_into_lines(text_a)
+        lines_b = split_into_lines(text_b)
+        
+        comparison_rows = identify_changes(lines_a, lines_b)
+        
+        # Build detailed change summary for AI
+        changes_summary = []
+        for row in comparison_rows:
+            if row['status'] != 'NO CHANGE':
+                changes_summary.append(f"[{row['status']}] Line {row['tag']}: {row['comments']}")
+        
+        # QC Checklist Prompt
+        qc_prompt = f"""You are a Document QC Analyst creating a COMPREHENSIVE CHECKLIST of ALL changes found between two documents.
 
 DOCUMENT A (Original):
-{text_a[:3000]}
+{text_a[:4000]}
 
 DOCUMENT B (Revised):
-{text_b[:3000]}
+{text_b[:4000]}
 
-ANALYSIS INSTRUCTIONS:
-1. Compare word-by-word and sentence-by-sentence
-2. Use proofreader's markup:
-   - **bold** = modified words/numbers/units
-   - [REMOVED] = deleted content
-   - [ADDED] = new content
-   - [UNCERTAIN] = unclear OCR text
-3. Be specific about changes (e.g., "105g → 107g" not just "weight changed")
-4. Follow Document A's sentence order exactly
-5. Flag OCR uncertainties if found
-6. Provide exact counts at the end
+DETECTED CHANGES (from line-by-line analysis):
+{chr(10).join(changes_summary)}
 
-OUTPUT FORMAT:
-Start with specific differences in a concise list format (one line per difference).
-Then provide: Total changes: X | Modified: X | Added: X | Removed: X
+TASK: Create a detailed QC checklist for manual review. For EACH change detected:
+1. List the exact change with before/after values
+2. Use this format: ☐ [TYPE] Location: Original → New | Status: (VERIFY/APPROVED/FLAGGED)
+3. Group by change type (MODIFIED, ADDED, REMOVED)
+4. Be specific with values, not vague descriptions
+5. Include line numbers or context
+6. Format for printing/manual checkoff
 
-Be concise, professional, and precise. Focus only on actual differences."""
+OUTPUT STRUCTURE:
+**MODIFIED ITEMS** (if any)
+☐ [Item description] | Original: X → New: Y
+
+**ADDED ITEMS** (if any)
+☐ [New content description]
+
+**REMOVED ITEMS** (if any)
+☐ [Removed content description]
+
+**SUMMARY COUNTS**
+Total Changes: X | Modified: X | Added: X | Removed: X
+
+Be concise, professional, and use EXACT VALUES from the documents."""
 
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -226,8 +245,8 @@ Be concise, professional, and precise. Focus only on actual differences."""
                     "content": qc_prompt
                 }
             ],
-            "temperature": 0.3,  # Lower temperature for more consistent, focused output
-            "max_tokens": 1500
+            "temperature": 0.2,
+            "max_tokens": 2000
         }
         
         response = requests.post(
