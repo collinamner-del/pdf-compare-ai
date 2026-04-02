@@ -82,15 +82,15 @@ export default function App() {
     <div className="app-container">
       {/* Header */}
       <div className="header">
-        <h1>📄 PDF Compare AI</h1>
-        <p className="subtitle">Professional PDF Comparison Report</p>
+        <h1>PDF Compare AI</h1>
+        <p className="subtitle">Professional Document Comparison Report</p>
       </div>
 
       {/* Upload Section */}
       <div className="upload-section">
         <div className="upload-row">
           <div className="upload-group">
-            <label htmlFor="file1">Upload PDF #1:</label>
+            <label htmlFor="file1">Upload PDF #1</label>
             <input
               id="file1"
               type="file"
@@ -101,7 +101,7 @@ export default function App() {
           </div>
 
           <div className="upload-group">
-            <label htmlFor="file2">Upload PDF #2:</label>
+            <label htmlFor="file2">Upload PDF #2</label>
             <input
               id="file2"
               type="file"
@@ -114,10 +114,10 @@ export default function App() {
 
         <div className="button-group">
           <button onClick={compare} className="btn btn-primary" disabled={loading}>
-            🔍 Compare Documents
+            Compare Documents
           </button>
           <button onClick={generateSummary} className="btn btn-secondary" disabled={loading}>
-            ✨ Generate AI Summary
+            Generate QC Checklist
           </button>
         </div>
       </div>
@@ -144,7 +144,7 @@ export default function App() {
               className={`tab ${activeTab === "summary" ? "active" : ""}`}
               onClick={() => setActiveTab("summary")}
             >
-              AI Summary
+              QC Checklist
             </button>
           )}
         </div>
@@ -182,50 +182,55 @@ export default function App() {
 
           {/* Comparison Table */}
           <div className="table-container">
-            <table className="comparison-table">
-              <thead>
-                <tr>
-                  <th>Row ID</th>
-                  <th>Tag</th>
-                  <th>PDF A Content</th>
-                  <th>PDF B Content</th>
-                  <th>Status</th>
-                  <th>Comments</th>
-                </tr>
-              </thead>
-              <tbody>
-                {report.comparison_table.map((row, index) => (
-                  <tr key={index} className={`row-${row.status.toLowerCase().replace(" ", "-")}`}>
-                    <td className="cell-row-id">{row.row_id}</td>
-                    <td className="cell-tag">{row.tag}</td>
-                    <td className="cell-content">
-                      {row.pdf_a_content || <span className="empty">—</span>}
-                    </td>
-                    <td className="cell-content">
-                      {row.pdf_b_content ? (
-                        <span dangerouslySetInnerHTML={{
-                          __html: row.pdf_b_content.replace(/\*\*(.*?)\*\*/g, '<mark>$1</mark>')
-                        }} />
-                      ) : (
-                        <span className="empty">—</span>
-                      )}
-                    </td>
-                    <td className={`cell-status ${getStatusColor(row.status)}`}>
-                      {row.status}
-                    </td>
-                    <td className="cell-comments">{row.comments}</td>
+            <div className="table-wrapper">
+              <table className="comparison-table">
+                <thead>
+                  <tr>
+                    <th>Row ID</th>
+                    <th>Tag</th>
+                    <th>PDF A Content</th>
+                    <th>PDF B Content</th>
+                    <th>Status</th>
+                    <th>Comments</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {report.comparison_table.map((row, index) => (
+                    <tr key={index} className={`row-${row.status.toLowerCase().replace(" ", "-")}`}>
+                      <td className="cell-row-id">{row.row_id}</td>
+                      <td className="cell-tag">{row.tag}</td>
+                      <td className="cell-content">
+                        {row.pdf_a_content || <span className="empty">—</span>}
+                      </td>
+                      <td className="cell-content">
+                        {row.pdf_b_content ? (
+                          <span dangerouslySetInnerHTML={{
+                            __html: row.pdf_b_content.replace(/\*\*(.*?)\*\*/g, '<mark>$1</mark>')
+                          }} />
+                        ) : (
+                          <span className="empty">—</span>
+                        )}
+                      </td>
+                      <td className={`cell-status ${getStatusColor(row.status)}`}>
+                        {row.status}
+                      </td>
+                      <td className="cell-comments">{row.comments}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="table-footer">
+              {report.summary.total_rows} rows | {report.summary.modified} modified | {report.summary.added} added | {report.summary.removed} removed
+            </div>
           </div>
         </div>
       )}
 
-      {/* AI Summary */}
+      {/* QC Checklist */}
       {summary && activeTab === "summary" && (
         <div className="summary-section">
-          <h2>AI Analysis Summary</h2>
+          <h2>QC Checklist & Analysis</h2>
           <div className="summary-content">
             {summary}
           </div>
