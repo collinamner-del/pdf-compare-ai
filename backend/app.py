@@ -8,11 +8,8 @@ import os
 app = Flask(__name__)
 CORS(app)
 
-# Initialize OpenAI client with API key from environment
-api_key = os.getenv('OPENAI_API_KEY')
-if not api_key:
-    raise ValueError("OPENAI_API_KEY environment variable not set")
-client = OpenAI(api_key=api_key)
+# OpenAI client - uses OPENAI_API_KEY environment variable automatically
+client = OpenAI()
 
 def extract_text(file):
     try:
