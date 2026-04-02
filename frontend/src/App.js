@@ -7,10 +7,11 @@ const API_URL = process.env.REACT_APP_API_URL || "http://localhost:5000";
 export default function App() {
   const [file1, setFile1] = useState(null);
   const [file2, setFile2] = useState(null);
-  const [diffHtml, setDiffHtml] = useState("");
+  const [report, setReport] = useState(null);
   const [summary, setSummary] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [activeTab, setActiveTab] = useState("comparison");
 
   const compare = async () => {
     if (!file1 || !file2) {
@@ -20,6 +21,8 @@ export default function App() {
 
     setLoading(true);
     setError("");
+    setReport(null);
+    setSummary("");
 
     const formData = new FormData();
     formData.append("file1", file1);
@@ -27,7 +30,8 @@ export default function App() {
 
     try {
       const response = await axios.post(`${API_URL}/compare`, formData);
-      setDiffHtml(response.data.html);
+      setReport(response.data.report);
+      setActiveTab("comparison");
     } catch (err) {
       setError("Comparison failed: " + err.message);
     } finally {
@@ -51,6 +55,7 @@ export default function App() {
     try {
       const response = await axios.post(`${API_URL}/summary`, formData);
       setSummary(response.data.summary);
+      setActiveTab("summary");
     } catch (err) {
       setError("Summary failed: " + err.message);
     } finally {
@@ -58,48 +63,172 @@ export default function App() {
     }
   };
 
+  const getStatusColor = (status) => {
+    switch (status) {
+      case "NO CHANGE":
+        return "status-no-change";
+      case "MODIFIED":
+        return "status-modified";
+      case "ADDED":
+        return "status-added";
+      case "REMOVED":
+        return "status-removed";
+      default:
+        return "";
+    }
+  };
+
   return (
-    <div className="container">
-      <h1>📄 PDF Compare AI</h1>
-      
-      <div className="upload-section">
-        <div>
-          <label>Upload PDF #1:</label>
-          <input
-            type="file"
-            accept=".pdf"
-            onChange={(e) => setFile1(e.target.files[0])}
-          />
-        </div>
-
-        <div>
-          <label>Upload PDF #2:</label>
-          <input
-            type="file"
-            accept=".pdf"
-            onChange={(e) => setFile2(e.target.files[0])}
-          />
-        </div>
-
-        <button onClick={compare}>🔍 Compare Documents</button>
-        <button onClick={generateSummary}>✨ Generate Summary</button>
+    <div className="app-container">
+      {/* Header */}
+      <div className="header">
+        <h1>📄 PDF Compare AI</h1>
+        <p className="subtitle">Professional PDF Comparison Report</p>
       </div>
 
-      {error && <div style={{ color: "red", padding: "10px" }}>{error}</div>}
+      {/* Upload Section */}
+      <div className="upload-section">
+        <div className="upload-row">
+          <div className="upload-group">
+            <label htmlFor="file1">Upload PDF #1:</label>
+            <input
+              id="file1"
+              type="file"
+              accept=".pdf"
+              onChange={(e) => setFile1(e.target.files[0])}
+            />
+            {file1 && <span className="file-name">{file1.name}</span>}
+          </div>
 
-      {loading && <div className="loading">Processing...</div>}
+          <div className="upload-group">
+            <label htmlFor="file2">Upload PDF #2:</label>
+            <input
+              id="file2"
+              type="file"
+              accept=".pdf"
+              onChange={(e) => setFile2(e.target.files[0])}
+            />
+            {file2 && <span className="file-name">{file2.name}</span>}
+          </div>
+        </div>
 
-      {summary && (
-        <div className="results">
-          <h2>Summary</h2>
-          <p>{summary}</p>
+        <div className="button-group">
+          <button onClick={compare} className="btn btn-primary" disabled={loading}>
+            🔍 Compare Documents
+          </button>
+          <button onClick={generateSummary} className="btn btn-secondary" disabled={loading}>
+            ✨ Generate AI Summary
+          </button>
+        </div>
+      </div>
+
+      {/* Error Message */}
+      {error && <div className="error-message">{error}</div>}
+
+      {/* Loading */}
+      {loading && <div className="loading">Processing your documents...</div>}
+
+      {/* Tabs */}
+      {(report || summary) && (
+        <div className="tabs">
+          {report && (
+            <button
+              className={`tab ${activeTab === "comparison" ? "active" : ""}`}
+              onClick={() => setActiveTab("comparison")}
+            >
+              Comparison Table
+            </button>
+          )}
+          {summary && (
+            <button
+              className={`tab ${activeTab === "summary" ? "active" : ""}`}
+              onClick={() => setActiveTab("summary")}
+            >
+              AI Summary
+            </button>
+          )}
         </div>
       )}
 
-      {diffHtml && (
-        <div className="results">
-          <h2>Detailed Comparison</h2>
-          <div dangerouslySetInnerHTML={{ __html: diffHtml }} />
+      {/* Comparison Report */}
+      {report && activeTab === "comparison" && (
+        <div className="report-section">
+          {/* Summary Statistics */}
+          <div className="summary-stats">
+            <h2>Report Summary</h2>
+            <div className="stats-grid">
+              <div className="stat-card">
+                <span className="stat-label">Total Rows</span>
+                <span className="stat-value">{report.summary.total_rows}</span>
+              </div>
+              <div className="stat-card status-no-change">
+                <span className="stat-label">No Change</span>
+                <span className="stat-value">{report.summary.no_change}</span>
+              </div>
+              <div className="stat-card status-modified">
+                <span className="stat-label">Modified</span>
+                <span className="stat-value">{report.summary.modified}</span>
+              </div>
+              <div className="stat-card status-added">
+                <span className="stat-label">Added</span>
+                <span className="stat-value">{report.summary.added}</span>
+              </div>
+              <div className="stat-card status-removed">
+                <span className="stat-label">Removed</span>
+                <span className="stat-value">{report.summary.removed}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Comparison Table */}
+          <div className="table-container">
+            <table className="comparison-table">
+              <thead>
+                <tr>
+                  <th>Row ID</th>
+                  <th>Tag</th>
+                  <th>PDF A Content</th>
+                  <th>PDF B Content</th>
+                  <th>Status</th>
+                  <th>Comments</th>
+                </tr>
+              </thead>
+              <tbody>
+                {report.comparison_table.map((row, index) => (
+                  <tr key={index} className={`row-${row.status.toLowerCase().replace(" ", "-")}`}>
+                    <td className="cell-row-id">{row.row_id}</td>
+                    <td className="cell-tag">{row.tag}</td>
+                    <td className="cell-content">
+                      {row.pdf_a_content || <span className="empty">—</span>}
+                    </td>
+                    <td className="cell-content">
+                      {row.pdf_b_content ? (
+                        <span dangerouslySetInnerHTML={{
+                          __html: row.pdf_b_content.replace(/\*\*(.*?)\*\*/g, '<mark>$1</mark>')
+                        }} />
+                      ) : (
+                        <span className="empty">—</span>
+                      )}
+                    </td>
+                    <td className={`cell-status ${getStatusColor(row.status)}`}>
+                      {row.status}
+                    </td>
+                    <td className="cell-comments">{row.comments}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* AI Summary */}
+      {summary && activeTab === "summary" && (
+        <div className="summary-section">
+          <h2>AI Analysis Summary</h2>
+          <div className="summary-content">
+            {summary}
+          </div>
         </div>
       )}
     </div>
