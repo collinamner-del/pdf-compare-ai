@@ -1,16 +1,28 @@
-from flask import Flask, request, Response, jsonify
+from flask import Flask, request, jsonify
 from flask_cors import CORS
-import fitz
+import pdfplumber
 import difflib
 from openai import OpenAI
+import os
 
 app = Flask(__name__)
 CORS(app)
-client = OpenAI()
+
+# Initialize OpenAI client with API key from environment
+api_key = os.getenv('OPENAI_API_KEY')
+if not api_key:
+    raise ValueError("OPENAI_API_KEY environment variable not set")
+client = OpenAI(api_key=api_key)
 
 def extract_text(file):
-    pdf = fitz.open(stream=file.read(), filetype="pdf")
-    return "\n".join([p.get_text() for p in pdf])
+    try:
+        with pdfplumber.open(file) as pdf:
+            text = ""
+            for page in pdf.pages:
+                text += page.extract_text() + "\n"
+        return text
+    except Exception as e:
+        raise Exception(f"Failed to extract text from PDF: {str(e)}")
 
 @app.route("/")
 def home():
@@ -56,4 +68,4 @@ def summary():
         return {"error": str(e)}, 400
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
