@@ -4,31 +4,76 @@ import pdfplumber
 import requests
 import os
 import difflib
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 app = Flask(__name__)
 CORS(app)
 
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
-def extract_text(file):
+def extract_text_with_regions(file):
+    """Extract text while preserving spatial information and grouping"""
     try:
         with pdfplumber.open(file) as pdf:
-            text = ""
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
-        return text
+            text_regions = []
+            
+            for page_num, page in enumerate(pdf.pages):
+                # Get text with spatial info
+                text_dict = page.extract_text_simple()
+                
+                # Also try to extract tables (nutrition tables, ingredient lists)
+                tables = page.extract_tables()
+                
+                # Extract words with bounding boxes
+                words = page.extract_words()
+                
+                if words:
+                    # Group words into logical sections based on position
+                    # Sort by Y position (top to bottom), then X position (left to right)
+                    sorted_words = sorted(words, key=lambda w: (round(w['top'] / 20) * 20, w['left']))
+                    
+                    current_line = []
+                    current_y = None
+                    
+                    for word in sorted_words:
+                        word_y = round(word['top'] / 20) * 20  # Group words on same line
+                        
+                        # If we moved to a new line, save the current line
+                        if current_y is not None and word_y != current_y:
+                            if current_line:
+                                text_regions.append(' '.join(current_line).strip())
+                            current_line = []
+                        
+                        current_line.append(word['text'])
+                        current_y = word_y
+                    
+                    # Add final line
+                    if current_line:
+                        text_regions.append(' '.join(current_line).strip())
+                
+                # Add tables as structured text
+                if tables:
+                    for table in tables:
+                        for row in table:
+                            row_text = ' | '.join([str(cell) if cell else '' for cell in row])
+                            if row_text.strip():
+                                text_regions.append(row_text)
+                
+                # Fallback to simple extraction if regions are empty
+                if not text_regions:
+                    simple_text = page.extract_text()
+                    if simple_text:
+                        text_regions.extend(simple_text.split('\n'))
+            
+            # Remove empty lines
+            text_regions = [line.strip() for line in text_regions if line.strip()]
+            return text_regions
+    
     except Exception as e:
         raise Exception(f"Failed to extract text: {str(e)}")
 
-def split_into_lines(text):
-    """Split text into lines, preserving structure"""
-    return [line for line in text.split('\n')]
-
-def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
-    """Compare two sets of lines and identify changes"""
+def smart_compare_lines(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
+    """Smart comparison that groups related changes"""
     rows = []
     matcher = difflib.SequenceMatcher(None, lines_a, lines_b)
     
@@ -40,10 +85,10 @@ def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
                 rows.append({
                     "row_id": f"R{row_id}",
                     "tag": f"Line {i1 + i + 1}",
-                    "pdf_a_content": lines_a[i1 + i],
-                    "pdf_b_content": lines_a[i1 + i],
+                    "pdf_a_content": lines_a[i1 + i][:100],
+                    "pdf_b_content": lines_a[i1 + i][:100],
                     "status": "NO CHANGE",
-                    "comments": "No changes"
+                    "comments": "Unchanged"
                 })
                 row_id += 1
         
@@ -55,17 +100,19 @@ def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
                 
                 if a_line != b_line:
                     b_line_bold = highlight_differences(a_line, b_line)
+                    status = "MODIFIED"
                 else:
                     b_line_bold = b_line
+                    status = "NO CHANGE"
                 
                 comment = generate_comment(a_line, b_line)
                 
                 rows.append({
                     "row_id": f"R{row_id}",
                     "tag": f"Line {i1 + i + 1}",
-                    "pdf_a_content": a_line,
-                    "pdf_b_content": b_line_bold,
-                    "status": "MODIFIED" if a_line != b_line else "NO CHANGE",
+                    "pdf_a_content": a_line[:100],
+                    "pdf_b_content": b_line_bold[:100],
+                    "status": status,
                     "comments": comment
                 })
                 row_id += 1
@@ -75,7 +122,7 @@ def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
                 rows.append({
                     "row_id": f"R{row_id}",
                     "tag": f"Line {i1 + i + 1}",
-                    "pdf_a_content": lines_a[i1 + i],
+                    "pdf_a_content": lines_a[i1 + i][:100],
                     "pdf_b_content": "[DELETED]",
                     "status": "DELETED",
                     "comments": "Content removed"
@@ -88,7 +135,7 @@ def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
                     "row_id": f"R{row_id}",
                     "tag": f"New Line",
                     "pdf_a_content": "",
-                    "pdf_b_content": f"**{lines_b[j1 + i]}**",
+                    "pdf_b_content": f"**{lines_b[j1 + i][:100]}**",
                     "status": "ADDED",
                     "comments": "New content"
                 })
@@ -97,7 +144,7 @@ def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
     return rows
 
 def highlight_differences(text_a: str, text_b: str) -> str:
-    """Bold only the changed characters/words"""
+    """Bold only the changed parts"""
     if not text_a or not text_b:
         return f"**{text_b}**"
     
@@ -113,14 +160,14 @@ def highlight_differences(text_a: str, text_b: str) -> str:
     return ''.join(result)
 
 def generate_comment(text_a: str, text_b: str) -> str:
-    """Generate plain-language comment about the change"""
+    """Generate brief comment about the change"""
     if not text_a:
-        return f"Added: {text_b[:40]}"
+        return f"Added: {text_b[:35]}"
     if not text_b:
-        return f"Deleted: {text_a[:40]}"
+        return f"Deleted: {text_a[:35]}"
     if text_a == text_b:
-        return "No change"
-    return f"Modified: {text_a[:35]} to {text_b[:35]}"
+        return "Unchanged"
+    return f"Modified: {text_a[:30]} to {text_b[:30]}"
 
 def generate_summary(rows: List[Dict]) -> Dict:
     """Generate summary statistics"""
@@ -150,19 +197,16 @@ def compare():
         f1 = request.files["file1"]
         f2 = request.files["file2"]
         
-        text_a = extract_text(f1)
-        text_b = extract_text(f2)
+        lines_a = extract_text_with_regions(f1)
+        lines_b = extract_text_with_regions(f2)
         
-        lines_a = split_into_lines(text_a)
-        lines_b = split_into_lines(text_b)
-        
-        comparison_rows = identify_changes(lines_a, lines_b)
+        comparison_rows = smart_compare_lines(lines_a, lines_b)
         summary = generate_summary(comparison_rows)
         
         return jsonify({
             "report": {
                 "document_type": "pdf_comparison",
-                "purpose": "Line-by-line comparison of PDF A vs PDF B",
+                "purpose": "Smart region-based comparison of PDF A vs PDF B",
                 "comparison_table": comparison_rows,
                 "summary": summary
             }
@@ -183,55 +227,48 @@ def summary():
         f1 = request.files["file1"]
         f2 = request.files["file2"]
         
-        text_a = extract_text(f1)
-        text_b = extract_text(f2)
+        lines_a = extract_text_with_regions(f1)
+        lines_b = extract_text_with_regions(f2)
         
-        lines_a = split_into_lines(text_a)
-        lines_b = split_into_lines(text_b)
+        comparison_rows = smart_compare_lines(lines_a, lines_b)
         
-        comparison_rows = identify_changes(lines_a, lines_b)
-        
-        # Build detailed change summary for AI
+        # Build change summary
         changes_list = []
         for row in comparison_rows:
             if row['status'] != 'NO CHANGE':
                 changes_list.append({
                     'type': row['status'],
                     'location': row['tag'],
-                    'pdf_a': row['pdf_a_content'][:60],
-                    'pdf_b': row['pdf_b_content'][:60],
+                    'original': row['pdf_a_content'][:50],
+                    'updated': row['pdf_b_content'][:50],
                     'comment': row['comments']
                 })
         
-        # Format changes for prompt
         changes_text = ""
         if changes_list:
             for change in changes_list:
-                changes_text += f"- {change['type']}: {change['comment']} ({change['location']})\n"
+                changes_text += f"- {change['type']}: {change['comment']}\n"
         
-        # Friendly QC Summary Prompt
-        qc_prompt = f"""You are a helpful Document Quality Control Assistant. Your job is to summarize the changes found when comparing two versions of a document.
+        qc_prompt = f"""You are a Document Quality Control Assistant reviewing food packaging updates.
 
-Original Document (PDF 1):
-{text_a[:3500]}
+Original Packaging (PDF 1):
+{chr(10).join(lines_a[:50])}
 
-Updated Document (PDF 2):
-{text_b[:3500]}
+Updated Packaging (PDF 2):
+{chr(10).join(lines_b[:50])}
 
 Changes Found:
 {changes_text if changes_text else 'No changes detected'}
 
-TASK: Write a friendly, professional QC summary for a quality control team. Be helpful and clear.
+TASK: Write a clear, friendly QC summary for the quality control team.
 
-Format your response as:
-1. Brief overview of what changed
-2. List all specific changes with their locations (one per line with checkbox format)
-3. Action items for verification
-4. Any notes or warnings if needed
+Include:
+1. Brief overview of changes
+2. List each specific change with exact values (one per line with checkbox)
+3. Areas that need verification
+4. Any regulatory or compliance notes
 
-Use simple language. Be clear and specific. Include exact values when relevant. No arrows or technical jargon needed.
-
-Make it easy for someone to print and check off items as they verify them."""
+Be specific with numbers and exact text. Use simple language. Format for printing."""
 
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -240,12 +277,7 @@ Make it easy for someone to print and check off items as they verify them."""
         
         payload = {
             "model": "gpt-3.5-turbo",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": qc_prompt
-                }
-            ],
+            "messages": [{"role": "user", "content": qc_prompt}],
             "temperature": 0.3,
             "max_tokens": 1800
         }
