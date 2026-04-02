@@ -188,8 +188,8 @@ export default function App() {
                   <tr>
                     <th>Row</th>
                     <th>Location</th>
-                    <th>PDF #1</th>
-                    <th>PDF #2</th>
+                    <th>PDF #1 (Original)</th>
+                    <th>PDF #2 (Updated)</th>
                     <th>Status</th>
                     <th>Action</th>
                   </tr>
