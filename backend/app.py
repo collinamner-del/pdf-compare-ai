@@ -4,6 +4,7 @@ import pdfplumber
 import requests
 import os
 import difflib
+import re
 from typing import List, Dict
 
 app = Flask(__name__)
@@ -14,7 +15,6 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 def extract_text(file):
     """Simple, proven text extraction"""
     try:
-        # Reset file pointer
         if hasattr(file, 'seek'):
             file.seek(0)
         
@@ -28,12 +28,30 @@ def extract_text(file):
     except Exception as e:
         raise Exception(f"Failed to extract text: {str(e)}")
 
-def split_into_lines(text):
-    """Split text into lines, preserving structure"""
-    return [line for line in text.split('\n')]
+def split_into_sentences(text):
+    """Split text into sentences/blocks, keeping them together"""
+    # Split by paragraph breaks first
+    paragraphs = text.split('\n\n')
+    
+    sentences = []
+    for para in paragraphs:
+        if not para.strip():
+            continue
+        
+        # Within each paragraph, split by sentence-ending punctuation
+        # Keep punctuation with the sentence
+        sent_list = re.split(r'(?<=[.!?])\s+(?=[A-Z])', para.strip())
+        
+        for sent in sent_list:
+            sent = sent.strip()
+            if sent:
+                # Don't split very short text - keep it together
+                sentences.append(sent)
+    
+    return sentences
 
 def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
-    """Compare two sets of lines and identify changes"""
+    """Compare sentences and identify changes"""
     rows = []
     matcher = difflib.SequenceMatcher(None, lines_a, lines_b)
     
@@ -44,9 +62,9 @@ def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
             for i in range(i2 - i1):
                 rows.append({
                     "row_id": f"R{row_id}",
-                    "tag": f"Line {i1 + i + 1}",
-                    "pdf_a_content": lines_a[i1 + i][:120],
-                    "pdf_b_content": lines_a[i1 + i][:120],
+                    "tag": f"Block {i1 + i + 1}",
+                    "pdf_a_content": lines_a[i1 + i][:150],
+                    "pdf_b_content": lines_a[i1 + i][:150],
                     "status": "NO CHANGE",
                     "comments": "Unchanged"
                 })
@@ -58,32 +76,52 @@ def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
                 a_line = lines_a[i1 + i] if i1 + i < i2 else ""
                 b_line = lines_b[j1 + i] if j1 + i < j2 else ""
                 
-                if a_line != b_line:
+                # Clear DELETED indication
+                if a_line and not b_line:
+                    rows.append({
+                        "row_id": f"R{row_id}",
+                        "tag": f"Block {i1 + i + 1}",
+                        "pdf_a_content": a_line[:150],
+                        "pdf_b_content": "❌ [DELETED]",
+                        "status": "DELETED",
+                        "comments": "Content removed entirely"
+                    })
+                    row_id += 1
+                
+                # ADDED indication
+                elif not a_line and b_line:
+                    rows.append({
+                        "row_id": f"R{row_id}",
+                        "tag": f"Block New",
+                        "pdf_a_content": "",
+                        "pdf_b_content": f"✅ **{b_line[:150]}**",
+                        "status": "ADDED",
+                        "comments": "New content added"
+                    })
+                    row_id += 1
+                
+                # MODIFIED
+                elif a_line and b_line and a_line != b_line:
                     b_line_bold = highlight_differences(a_line, b_line)
-                else:
-                    b_line_bold = b_line
-                
-                comment = generate_comment(a_line, b_line)
-                
-                rows.append({
-                    "row_id": f"R{row_id}",
-                    "tag": f"Line {i1 + i + 1}",
-                    "pdf_a_content": a_line[:120],
-                    "pdf_b_content": b_line_bold[:120],
-                    "status": "MODIFIED" if a_line != b_line else "NO CHANGE",
-                    "comments": comment
-                })
-                row_id += 1
+                    rows.append({
+                        "row_id": f"R{row_id}",
+                        "tag": f"Block {i1 + i + 1}",
+                        "pdf_a_content": a_line[:150],
+                        "pdf_b_content": b_line_bold[:150],
+                        "status": "MODIFIED",
+                        "comments": f"Changed"
+                    })
+                    row_id += 1
         
         elif tag == 'delete':
             for i in range(i2 - i1):
                 rows.append({
                     "row_id": f"R{row_id}",
-                    "tag": f"Line {i1 + i + 1}",
-                    "pdf_a_content": lines_a[i1 + i][:120],
-                    "pdf_b_content": "[DELETED]",
+                    "tag": f"Block {i1 + i + 1}",
+                    "pdf_a_content": lines_a[i1 + i][:150],
+                    "pdf_b_content": "❌ [DELETED]",
                     "status": "DELETED",
-                    "comments": "Content removed"
+                    "comments": "Content removed entirely"
                 })
                 row_id += 1
         
@@ -91,18 +129,18 @@ def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
             for i in range(j2 - j1):
                 rows.append({
                     "row_id": f"R{row_id}",
-                    "tag": f"New Line",
+                    "tag": f"Block New",
                     "pdf_a_content": "",
-                    "pdf_b_content": f"**{lines_b[j1 + i][:120]}**",
+                    "pdf_b_content": f"✅ **{lines_b[j1 + i][:150]}**",
                     "status": "ADDED",
-                    "comments": "New content"
+                    "comments": "New content added"
                 })
                 row_id += 1
     
     return rows
 
 def highlight_differences(text_a: str, text_b: str) -> str:
-    """Bold only the changed characters/words"""
+    """Bold only the changed parts"""
     if not text_a or not text_b:
         return f"**{text_b}**"
     
@@ -118,14 +156,14 @@ def highlight_differences(text_a: str, text_b: str) -> str:
     return ''.join(result)
 
 def generate_comment(text_a: str, text_b: str) -> str:
-    """Generate plain-language comment about the change"""
+    """Generate plain-language comment"""
     if not text_a:
         return f"Added: {text_b[:40]}"
     if not text_b:
         return f"Deleted: {text_a[:40]}"
     if text_a == text_b:
         return "Unchanged"
-    return f"Modified: {text_a[:35]} to {text_b[:35]}"
+    return f"Modified"
 
 def generate_summary(rows: List[Dict]) -> Dict:
     """Generate summary statistics"""
@@ -144,12 +182,11 @@ def generate_summary(rows: List[Dict]) -> Dict:
 
 @app.route("/")
 def home():
-    return jsonify({"status": "API running"})
+    return jsonify({"status": "API running - Sentence-Aware"})
 
 @app.route("/compare", methods=["POST"])
 def compare():
     try:
-        # Better file validation
         if 'file1' not in request.files or 'file2' not in request.files:
             return jsonify({"error": "Both PDF files required"}), 400
         
@@ -172,8 +209,9 @@ def compare():
         if not text_a or not text_b:
             return jsonify({"error": "Could not extract text from PDFs"}), 400
         
-        lines_a = split_into_lines(text_a)
-        lines_b = split_into_lines(text_b)
+        # Use sentence-based splitting instead of line-based
+        lines_a = split_into_sentences(text_a)
+        lines_b = split_into_sentences(text_b)
         
         comparison_rows = identify_changes(lines_a, lines_b)
         summary = generate_summary(comparison_rows)
@@ -181,7 +219,7 @@ def compare():
         return jsonify({
             "report": {
                 "document_type": "pdf_comparison",
-                "purpose": "Document comparison analysis",
+                "purpose": "Sentence-aware document comparison",
                 "comparison_table": comparison_rows,
                 "summary": summary
             }
@@ -196,7 +234,6 @@ def summary():
         if not OPENAI_API_KEY:
             return jsonify({"error": "OpenAI API key not configured"}), 500
         
-        # Better file validation
         if 'file1' not in request.files or 'file2' not in request.files:
             return jsonify({"error": "Both PDF files required"}), 400
         
@@ -219,49 +256,48 @@ def summary():
         if not text_a or not text_b:
             return jsonify({"error": "Could not extract text from PDFs"}), 400
         
-        lines_a = split_into_lines(text_a)
-        lines_b = split_into_lines(text_b)
+        lines_a = split_into_sentences(text_a)
+        lines_b = split_into_sentences(text_b)
         
         comparison_rows = identify_changes(lines_a, lines_b)
         
-        # Build detailed change summary - IMPROVED FORMAT
-        important_changes = [r for r in comparison_rows if r.get('status') in ['MODIFIED', 'ADDED', 'DELETED']]
+        # Build detailed changes list
+        important_changes = [r for r in comparison_rows if r.get('status') != 'NO CHANGE']
         
         changes_detail = []
-        for change in important_changes[:25]:
+        for i, change in enumerate(important_changes[:30], 1):
             status = change.get('status', '')
             pdf1 = change.get('pdf_a_content', '')
-            pdf2 = change.get('pdf_b_content', '').replace('**', '')
-            line = change.get('tag', '')
+            pdf2 = change.get('pdf_b_content', '').replace('**', '').replace('❌', '').replace('✅', '').strip()
             
-            if status == 'MODIFIED':
-                changes_detail.append(f"{line}: PDF 1 '{pdf1}' → PDF 2 '{pdf2}'")
+            if status == 'DELETED':
+                changes_detail.append(f"{i}. [ ] PDF 1: \"{pdf1}\"   PDF 2: ❌ [DELETED]   ACTION: Verify")
             elif status == 'ADDED':
-                changes_detail.append(f"{line}: ADDED '{pdf2}'")
-            elif status == 'DELETED':
-                changes_detail.append(f"{line}: DELETED '{pdf1}'")
+                changes_detail.append(f"{i}. [ ] PDF 1: [NEW]   PDF 2: \"{pdf2}\"   ACTION: Verify")
+            elif status == 'MODIFIED':
+                changes_detail.append(f"{i}. [ ] PDF 1: \"{pdf1}\"   PDF 2: \"{pdf2}\"   ACTION: Verify")
         
         changes_text = "\n".join(changes_detail) if changes_detail else "No significant changes detected"
         
-        # IMPROVED AI PROMPT
+        # Improved AI prompt with checkbox format
         qc_prompt = f"""You are a QC analyst. Create a professional checklist of changes from PDF 1 (original) to PDF 2 (updated).
 
 CHANGES DETECTED:
 {changes_text}
 
-Format your response EXACTLY like this example:
+Format your response as a checklist. Each item should have:
+- A checkbox [ ]
+- PDF 1 content in quotes
+- PDF 2 content in quotes
+- Clear indication if DELETED with ❌ [DELETED]
+- ACTION field (Verify/Confirm/Check)
 
-Updates Required:
+Example format:
+[ ] 1. PDF 1: "Original text here"   PDF 2: "Updated text here"   ACTION: Verify
 
-1. [ ] PDF 1: "Old text here"
-   PDF 2: "New text here"
-   ACTION: Verify
+[ ] 2. PDF 1: "Text to remove"   PDF 2: ❌ [DELETED]   ACTION: Confirm removal
 
-2. [ ] PDF 1: [DELETED]
-   PDF 2: "Replacement text"
-   ACTION: Confirm
-
-Include only actual changes. Be specific with exact text. Keep professional tone."""
+Include only actual changes. Keep professional tone."""
 
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -277,7 +313,7 @@ Include only actual changes. Be specific with exact text. Keep professional tone
                 }
             ],
             "temperature": 0.3,
-            "max_tokens": 1800
+            "max_tokens": 2000
         }
         
         response = requests.post(
