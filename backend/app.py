@@ -11,206 +11,165 @@ CORS(app)
 
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
-def safe_extract_text(file) -> List[str]:
-    """Extract text with comprehensive error handling"""
-    lines = []
-    
+def extract_text(file):
     try:
         with pdfplumber.open(file) as pdf:
-            for page_num, page in enumerate(pdf.pages):
-                try:
-                    # Method 1: Try word-based extraction
-                    words = page.extract_words()
-                    if words:
-                        sorted_words = sorted(words, key=lambda w: (round(w['top'] / 20) * 20, w['left']))
-                        current_line = []
-                        current_y = None
-                        
-                        for word in sorted_words:
-                            word_y = round(word['top'] / 20) * 20
-                            if current_y is not None and word_y != current_y:
-                                if current_line:
-                                    lines.append(' '.join(current_line))
-                                current_line = []
-                            current_line.append(word['text'])
-                            current_y = word_y
-                        
-                        if current_line:
-                            lines.append(' '.join(current_line))
-                    
-                    # Method 2: Fallback to simple text extraction
-                    if not lines:
-                        text = page.extract_text()
-                        if text:
-                            for line in text.split('\n'):
-                                if line.strip():
-                                    lines.append(line.strip())
-                
-                except Exception as e:
-                    print(f"Error on page {page_num}: {str(e)}")
-                    continue
-        
-        return [l.strip() for l in lines if l.strip()]
-    
+            text = ""
+            for page in pdf.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+        return text
     except Exception as e:
-        raise Exception(f"PDF extraction failed: {str(e)}")
+        raise Exception(f"Failed to extract text: {str(e)}")
 
-def compare_texts(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
-    """Simple, reliable text comparison"""
+def split_into_lines(text):
+    """Split text into lines, preserving structure"""
+    return [line for line in text.split('\n')]
+
+def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
+    """Compare two sets of lines and identify changes"""
     rows = []
     matcher = difflib.SequenceMatcher(None, lines_a, lines_b)
+    
     row_id = 1
     
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        try:
-            if tag == 'equal':
-                for i in range(i2 - i1):
-                    rows.append({
-                        "row_id": f"R{row_id}",
-                        "tag": "GENERAL",
-                        "line": f"L{i1 + i + 1}",
-                        "pdf_a_content": lines_a[i1 + i][:100],
-                        "pdf_b_content": lines_a[i1 + i][:100],
-                        "data_type": "TEXT",
-                        "status": "NO CHANGE",
-                        "significance": "low",
-                        "comments": "Unchanged"
-                    })
-                    row_id += 1
-            
-            elif tag == 'replace':
-                max_lines = max(i2 - i1, j2 - j1)
-                for i in range(max_lines):
-                    a_line = lines_a[i1 + i] if i1 + i < i2 else ""
-                    b_line = lines_b[j1 + i] if j1 + i < j2 else ""
-                    
-                    if a_line != b_line:
-                        # Highlight differences
-                        matcher_inner = difflib.SequenceMatcher(None, a_line, b_line)
-                        b_display = ""
-                        for tag_inner, i1_inner, i2_inner, j1_inner, j2_inner in matcher_inner.get_opcodes():
-                            if tag_inner == 'equal':
-                                b_display += b_line[j1_inner:j2_inner]
-                            else:
-                                b_display += f"**{b_line[j1_inner:j2_inner]}**"
-                        
-                        rows.append({
-                            "row_id": f"R{row_id}",
-                            "tag": "GENERAL",
-                            "line": f"L{i1 + i + 1}",
-                            "pdf_a_content": a_line[:100],
-                            "pdf_b_content": b_display[:100],
-                            "data_type": "TEXT",
-                            "status": "MODIFIED",
-                            "significance": "high",
-                            "comments": f"Modified content"
-                        })
-                        row_id += 1
-                    else:
-                        rows.append({
-                            "row_id": f"R{row_id}",
-                            "tag": "GENERAL",
-                            "line": f"L{i1 + i + 1}",
-                            "pdf_a_content": a_line[:100],
-                            "pdf_b_content": a_line[:100],
-                            "data_type": "TEXT",
-                            "status": "NO CHANGE",
-                            "significance": "low",
-                            "comments": "Unchanged"
-                        })
-                        row_id += 1
-            
-            elif tag == 'delete':
-                for i in range(i2 - i1):
-                    rows.append({
-                        "row_id": f"R{row_id}",
-                        "tag": "GENERAL",
-                        "line": f"L{i1 + i + 1}",
-                        "pdf_a_content": lines_a[i1 + i][:100],
-                        "pdf_b_content": "[DELETED]",
-                        "data_type": "TEXT",
-                        "status": "DELETED",
-                        "significance": "high",
-                        "comments": "Content removed"
-                    })
-                    row_id += 1
-            
-            elif tag == 'insert':
-                for i in range(j2 - j1):
-                    rows.append({
-                        "row_id": f"R{row_id}",
-                        "tag": "GENERAL",
-                        "line": f"New",
-                        "pdf_a_content": "",
-                        "pdf_b_content": f"**{lines_b[j1 + i][:100]}**",
-                        "data_type": "TEXT",
-                        "status": "ADDED",
-                        "significance": "high",
-                        "comments": "New content"
-                    })
-                    row_id += 1
+        if tag == 'equal':
+            for i in range(i2 - i1):
+                rows.append({
+                    "row_id": f"R{row_id}",
+                    "tag": f"Line {i1 + i + 1}",
+                    "pdf_a_content": lines_a[i1 + i],
+                    "pdf_b_content": lines_a[i1 + i],
+                    "status": "NO CHANGE",
+                    "comments": "No changes"
+                })
+                row_id += 1
         
-        except Exception as e:
-            print(f"Error processing comparison: {str(e)}")
-            continue
+        elif tag == 'replace':
+            max_lines = max(i2 - i1, j2 - j1)
+            for i in range(max_lines):
+                a_line = lines_a[i1 + i] if i1 + i < i2 else ""
+                b_line = lines_b[j1 + i] if j1 + i < j2 else ""
+                
+                if a_line != b_line:
+                    b_line_bold = highlight_differences(a_line, b_line)
+                else:
+                    b_line_bold = b_line
+                
+                comment = generate_comment(a_line, b_line)
+                
+                rows.append({
+                    "row_id": f"R{row_id}",
+                    "tag": f"Line {i1 + i + 1}",
+                    "pdf_a_content": a_line,
+                    "pdf_b_content": b_line_bold,
+                    "status": "MODIFIED" if a_line != b_line else "NO CHANGE",
+                    "comments": comment
+                })
+                row_id += 1
+        
+        elif tag == 'delete':
+            for i in range(i2 - i1):
+                rows.append({
+                    "row_id": f"R{row_id}",
+                    "tag": f"Line {i1 + i + 1}",
+                    "pdf_a_content": lines_a[i1 + i],
+                    "pdf_b_content": "[DELETED]",
+                    "status": "DELETED",
+                    "comments": "Content removed"
+                })
+                row_id += 1
+        
+        elif tag == 'insert':
+            for i in range(j2 - j1):
+                rows.append({
+                    "row_id": f"R{row_id}",
+                    "tag": f"New Line",
+                    "pdf_a_content": "",
+                    "pdf_b_content": f"**{lines_b[j1 + i]}**",
+                    "status": "ADDED",
+                    "comments": "New content"
+                })
+                row_id += 1
     
     return rows
 
-def get_summary(rows: List[Dict]) -> Dict:
-    """Generate summary counts"""
-    try:
-        no_change = sum(1 for r in rows if r.get('status') == 'NO CHANGE')
-        modified = sum(1 for r in rows if r.get('status') == 'MODIFIED')
-        added = sum(1 for r in rows if r.get('status') == 'ADDED')
-        deleted = sum(1 for r in rows if r.get('status') == 'DELETED')
-        
-        return {
-            "total_rows": len(rows),
-            "no_change": no_change,
-            "modified": modified,
-            "added": added,
-            "deleted": deleted,
-            "critical_changes": modified + added + deleted
-        }
-    except Exception:
-        return {"total_rows": len(rows), "error": "Could not generate summary"}
+def highlight_differences(text_a: str, text_b: str) -> str:
+    """Bold only the changed characters/words"""
+    if not text_a or not text_b:
+        return f"**{text_b}**"
+    
+    matcher = difflib.SequenceMatcher(None, text_a, text_b)
+    result = []
+    
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            result.append(text_b[j1:j2])
+        elif tag in ['replace', 'insert']:
+            result.append(f"**{text_b[j1:j2]}**")
+    
+    return ''.join(result)
+
+def generate_comment(text_a: str, text_b: str) -> str:
+    """Generate plain-language comment about the change"""
+    if not text_a:
+        return f"Added: {text_b[:40]}"
+    if not text_b:
+        return f"Deleted: {text_a[:40]}"
+    if text_a == text_b:
+        return "No change"
+    return f"Modified: {text_a[:35]} to {text_b[:35]}"
+
+def generate_summary(rows: List[Dict]) -> Dict:
+    """Generate summary statistics"""
+    statuses = {}
+    for row in rows:
+        status = row['status']
+        statuses[status] = statuses.get(status, 0) + 1
+    
+    return {
+        "total_rows": len(rows),
+        "no_change": statuses.get('NO CHANGE', 0),
+        "added": statuses.get('ADDED', 0),
+        "deleted": statuses.get('DELETED', 0),
+        "modified": statuses.get('MODIFIED', 0)
+    }
 
 @app.route("/")
 def home():
-    return jsonify({"status": "API running - Production v1"})
+    return jsonify({"status": "API running"})
 
 @app.route("/compare", methods=["POST"])
 def compare():
     try:
         if 'file1' not in request.files or 'file2' not in request.files:
-            return jsonify({"error": "Both PDF files required"}), 400
+            return jsonify({"error": "Both files required"}), 400
         
         f1 = request.files["file1"]
         f2 = request.files["file2"]
         
-        # Extract text
-        lines_a = safe_extract_text(f1)
-        lines_b = safe_extract_text(f2)
+        text_a = extract_text(f1)
+        text_b = extract_text(f2)
         
-        if not lines_a or not lines_b:
-            return jsonify({"error": "Could not extract text from one or both PDFs"}), 400
+        lines_a = split_into_lines(text_a)
+        lines_b = split_into_lines(text_b)
         
-        # Compare
-        comparison_rows = compare_texts(lines_a, lines_b)
-        summary = get_summary(comparison_rows)
+        comparison_rows = identify_changes(lines_a, lines_b)
+        summary = generate_summary(comparison_rows)
         
         return jsonify({
             "report": {
                 "document_type": "pdf_comparison",
-                "purpose": "Document comparison analysis",
+                "purpose": "Line-by-line comparison of PDF A vs PDF B",
                 "comparison_table": comparison_rows,
                 "summary": summary
             }
         })
     
     except Exception as e:
-        print(f"Compare endpoint error: {str(e)}")
-        return jsonify({"error": f"Comparison failed: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/summary", methods=["POST"])
 def summary():
@@ -224,40 +183,56 @@ def summary():
         f1 = request.files["file1"]
         f2 = request.files["file2"]
         
-        # Extract text
-        lines_a = safe_extract_text(f1)
-        lines_b = safe_extract_text(f2)
+        text_a = extract_text(f1)
+        text_b = extract_text(f2)
         
-        if not lines_a or not lines_b:
-            return jsonify({"error": "Could not extract text from PDFs"}), 400
+        lines_a = split_into_lines(text_a)
+        lines_b = split_into_lines(text_b)
         
-        # Compare
-        comparison_rows = compare_texts(lines_a, lines_b)
+        comparison_rows = identify_changes(lines_a, lines_b)
         
-        # Find important changes
-        important_changes = [r for r in comparison_rows if r.get('status') in ['MODIFIED', 'ADDED', 'DELETED']]
-        
-        # Build summary text
+        # Build detailed change summary for AI
         changes_list = []
-        for change in important_changes[:20]:
-            changes_list.append(f"- {change.get('status')}: {change.get('comments')}")
+        for row in comparison_rows:
+            if row['status'] != 'NO CHANGE':
+                changes_list.append({
+                    'type': row['status'],
+                    'location': row['tag'],
+                    'pdf_a': row['pdf_a_content'][:60],
+                    'pdf_b': row['pdf_b_content'][:60],
+                    'comment': row['comments']
+                })
         
-        changes_text = "\n".join(changes_list) if changes_list else "No significant changes detected"
+        # Format changes for prompt
+        changes_text = ""
+        if changes_list:
+            for change in changes_list:
+                changes_text += f"- {change['type']}: {change['comment']} ({change['location']})\n"
         
-        # Create AI prompt
-        prompt = f"""Review these document changes and create a QC checklist.
+        # Friendly QC Summary Prompt
+        qc_prompt = f"""You are a helpful Document Quality Control Assistant. Your job is to summarize the changes found when comparing two versions of a document.
 
-CHANGES FOUND:
-{changes_text}
+Original Document (PDF 1):
+{text_a[:3500]}
 
-Create a professional QC summary with:
-1. Overview of changes
-2. Checklist items with checkboxes
-3. Action items
+Updated Document (PDF 2):
+{text_b[:3500]}
 
-Keep it professional and printable."""
-        
-        # Call OpenAI
+Changes Found:
+{changes_text if changes_text else 'No changes detected'}
+
+TASK: Write a friendly, professional QC summary for a quality control team. Be helpful and clear.
+
+Format your response as:
+1. Brief overview of what changed
+2. List all specific changes with their locations (one per line with checkbox format)
+3. Action items for verification
+4. Any notes or warnings if needed
+
+Use simple language. Be clear and specific. Include exact values when relevant. No arrows or technical jargon needed.
+
+Make it easy for someone to print and check off items as they verify them."""
+
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
             "Content-Type": "application/json"
@@ -265,9 +240,14 @@ Keep it professional and printable."""
         
         payload = {
             "model": "gpt-3.5-turbo",
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": qc_prompt
+                }
+            ],
             "temperature": 0.3,
-            "max_tokens": 1500
+            "max_tokens": 1800
         }
         
         response = requests.post(
@@ -278,17 +258,14 @@ Keep it professional and printable."""
         )
         
         if response.status_code != 200:
-            error_text = response.text if response.text else "Unknown error"
-            return jsonify({"error": f"OpenAI API error: {error_text}"}), 500
+            return jsonify({"error": f"OpenAI error: {response.text}"}), 500
         
         result = response.json()
         summary_text = result["choices"][0]["message"]["content"]
         
         return jsonify({"summary": summary_text})
-    
     except Exception as e:
-        print(f"Summary endpoint error: {str(e)}")
-        return jsonify({"error": f"Summary failed: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000, debug=False)
