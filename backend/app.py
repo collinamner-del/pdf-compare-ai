@@ -43,7 +43,7 @@ def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
                     "pdf_a_content": lines_a[i1 + i],
                     "pdf_b_content": lines_a[i1 + i],
                     "status": "NO CHANGE",
-                    "comments": "Content unchanged"
+                    "comments": "No changes"
                 })
                 row_id += 1
         
@@ -76,9 +76,9 @@ def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
                     "row_id": f"R{row_id}",
                     "tag": f"Line {i1 + i + 1}",
                     "pdf_a_content": lines_a[i1 + i],
-                    "pdf_b_content": "[REMOVED]",
-                    "status": "REMOVED",
-                    "comments": "Content removed in PDF B"
+                    "pdf_b_content": "[DELETED]",
+                    "status": "DELETED",
+                    "comments": "Content removed"
                 })
                 row_id += 1
         
@@ -90,7 +90,7 @@ def identify_changes(lines_a: List[str], lines_b: List[str]) -> List[Dict]:
                     "pdf_a_content": "",
                     "pdf_b_content": f"**{lines_b[j1 + i]}**",
                     "status": "ADDED",
-                    "comments": "New content added in PDF B"
+                    "comments": "New content"
                 })
                 row_id += 1
     
@@ -117,10 +117,10 @@ def generate_comment(text_a: str, text_b: str) -> str:
     if not text_a:
         return f"Added: {text_b[:40]}"
     if not text_b:
-        return f"Removed: {text_a[:40]}"
+        return f"Deleted: {text_a[:40]}"
     if text_a == text_b:
         return "No change"
-    return f"Modified: {text_a[:35]} → {text_b[:35]}"
+    return f"Modified: {text_a[:35]} to {text_b[:35]}"
 
 def generate_summary(rows: List[Dict]) -> Dict:
     """Generate summary statistics"""
@@ -133,7 +133,7 @@ def generate_summary(rows: List[Dict]) -> Dict:
         "total_rows": len(rows),
         "no_change": statuses.get('NO CHANGE', 0),
         "added": statuses.get('ADDED', 0),
-        "removed": statuses.get('REMOVED', 0),
+        "deleted": statuses.get('DELETED', 0),
         "modified": statuses.get('MODIFIED', 0)
     }
 
@@ -192,45 +192,46 @@ def summary():
         comparison_rows = identify_changes(lines_a, lines_b)
         
         # Build detailed change summary for AI
-        changes_summary = []
+        changes_list = []
         for row in comparison_rows:
             if row['status'] != 'NO CHANGE':
-                changes_summary.append(f"[{row['status']}] Line {row['tag']}: {row['comments']}")
+                changes_list.append({
+                    'type': row['status'],
+                    'location': row['tag'],
+                    'pdf_a': row['pdf_a_content'][:60],
+                    'pdf_b': row['pdf_b_content'][:60],
+                    'comment': row['comments']
+                })
         
-        # QC Checklist Prompt
-        qc_prompt = f"""You are a Document QC Analyst creating a COMPREHENSIVE CHECKLIST of ALL changes found between two documents.
+        # Format changes for prompt
+        changes_text = ""
+        if changes_list:
+            for change in changes_list:
+                changes_text += f"- {change['type']}: {change['comment']} ({change['location']})\n"
+        
+        # Friendly QC Summary Prompt
+        qc_prompt = f"""You are a helpful Document Quality Control Assistant. Your job is to summarize the changes found when comparing two versions of a document.
 
-DOCUMENT A (Original):
-{text_a[:4000]}
+Original Document (PDF 1):
+{text_a[:3500]}
 
-DOCUMENT B (Revised):
-{text_b[:4000]}
+Updated Document (PDF 2):
+{text_b[:3500]}
 
-DETECTED CHANGES (from line-by-line analysis):
-{chr(10).join(changes_summary)}
+Changes Found:
+{changes_text if changes_text else 'No changes detected'}
 
-TASK: Create a detailed QC checklist for manual review. For EACH change detected:
-1. List the exact change with before/after values
-2. Use this format: ☐ [TYPE] Location: Original → New | Status: (VERIFY/APPROVED/FLAGGED)
-3. Group by change type (MODIFIED, ADDED, REMOVED)
-4. Be specific with values, not vague descriptions
-5. Include line numbers or context
-6. Format for printing/manual checkoff
+TASK: Write a friendly, professional QC summary for a quality control team. Be helpful and clear.
 
-OUTPUT STRUCTURE:
-**MODIFIED ITEMS** (if any)
-☐ [Item description] | Original: X → New: Y
+Format your response as:
+1. Brief overview of what changed
+2. List all specific changes with their locations (one per line with checkbox format)
+3. Action items for verification
+4. Any notes or warnings if needed
 
-**ADDED ITEMS** (if any)
-☐ [New content description]
+Use simple language. Be clear and specific. Include exact values when relevant. No arrows or technical jargon needed.
 
-**REMOVED ITEMS** (if any)
-☐ [Removed content description]
-
-**SUMMARY COUNTS**
-Total Changes: X | Modified: X | Added: X | Removed: X
-
-Be concise, professional, and use EXACT VALUES from the documents."""
+Make it easy for someone to print and check off items as they verify them."""
 
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -245,8 +246,8 @@ Be concise, professional, and use EXACT VALUES from the documents."""
                     "content": qc_prompt
                 }
             ],
-            "temperature": 0.2,
-            "max_tokens": 2000
+            "temperature": 0.3,
+            "max_tokens": 1800
         }
         
         response = requests.post(
