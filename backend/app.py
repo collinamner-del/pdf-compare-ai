@@ -1,12 +1,12 @@
 """
-FUZZY MATCHING PDF COMPARISON
+INTELLIGENT PDF COMPARISON WITH BLOCK MATCHING
 
-Instead of flagging every difference, this scores similarity:
-- 95%+ match = Same block (NO CHANGE)
-- 85-95% match = Minor variation (SKIP or note)
-- <85% match = Real change (MODIFIED)
-
-This dramatically reduces false positives!
+Algorithm:
+1. Extract text blocks from both PDFs
+2. For EACH block in PDF 1, find the BEST matching block in PDF 2
+3. Calculate similarity score for each match
+4. Identify unmatched blocks (deleted/added)
+5. Generate clear QC report
 """
 
 from flask import Flask, request, jsonify
@@ -14,9 +14,8 @@ from flask_cors import CORS
 import pdfplumber
 import requests
 import os
-import difflib
 import re
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from collections import defaultdict
 
 app = Flask(__name__)
@@ -25,236 +24,133 @@ CORS(app)
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
 # ============================================================================
-# SIMILARITY SCORING
+# INTELLIGENT BLOCK MATCHING
 # ============================================================================
 
-def calculate_similarity(text_a: str, text_b: str) -> float:
-    """
-    Calculate similarity between two text blocks as percentage (0-100).
+class BlockMatcher:
+    """Intelligently matches text blocks across two PDFs"""
     
-    Uses SequenceMatcher ratio which is fast and effective.
-    """
-    if not text_a or not text_b:
-        return 0.0
+    def __init__(self, blocks_a: List[str], blocks_b: List[str]):
+        self.blocks_a = blocks_a
+        self.blocks_b = blocks_b
+        self.matches = []
+        self.unmatched_a = set(range(len(blocks_a)))
+        self.unmatched_b = set(range(len(blocks_b)))
     
-    # Normalize text (remove extra spaces)
-    text_a_norm = ' '.join(text_a.split())
-    text_b_norm = ' '.join(text_b.split())
-    
-    # Calculate similarity ratio (0.0 to 1.0)
-    ratio = difflib.SequenceMatcher(None, text_a_norm, text_b_norm).ratio()
-    
-    return ratio * 100  # Return as percentage
-
-def categorize_change(similarity_score: float, threshold_high=95, threshold_low=85) -> str:
-    """
-    Categorize change based on similarity score.
-    
-    95%+  = Essentially same (minor typo/spacing)
-    85-95% = Similar but changed
-    <85%  = Real change
-    """
-    if similarity_score >= threshold_high:
-        return "SAME"
-    elif similarity_score >= threshold_low:
-        return "SIMILAR"
-    else:
-        return "CHANGED"
-
-class FuzzyComparator:
-    """Compare blocks with fuzzy matching"""
-    
-    def __init__(self, threshold_show_change=85):
+    def match_blocks(self, similarity_threshold=80) -> List[Dict]:
         """
-        threshold_show_change: Only show changes below this similarity %
+        Match blocks across PDFs intelligently.
         
-        Typical values:
-        - 90: Only show real changes (strict)
-        - 85: Show meaningful changes (recommended)
-        - 80: Show all changes (permissive)
-        """
-        self.threshold = threshold_show_change
-    
-    def compare(self, blocks_a: List[str], blocks_b: List[str]) -> Tuple[List[Dict], Dict]:
-        """
-        Compare blocks using fuzzy matching.
-        Returns: (comparison_rows, statistics)
+        For each block in A, find best match in B.
+        Returns list of matched pairs with similarity scores.
         """
         
-        rows = []
-        stats = {
-            'total': 0,
-            'identical': 0,
-            'minor_variation': 0,
-            'modified': 0,
-            'added': 0,
-            'deleted': 0,
-            'similarity_scores': []
-        }
+        matches = []
         
-        # Use SequenceMatcher for best-matching blocks
-        matcher = difflib.SequenceMatcher(None, blocks_a, blocks_b)
-        row_id = 1
-        
-        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        # For each block in PDF A, find best match in PDF B
+        for idx_a, block_a in enumerate(self.blocks_a):
+            best_match_idx = None
+            best_similarity = 0
             
-            if tag == 'equal':
-                # Identical blocks
-                for i in range(i2 - i1):
-                    rows.append({
-                        "row_id": f"R{row_id}",
-                        "tag": f"Block {i1 + i + 1}",
-                        "pdf_a_content": blocks_a[i1 + i][:150],
-                        "pdf_b_content": blocks_a[i1 + i][:150],
-                        "similarity": 100.0,
-                        "status": "NO CHANGE",
-                        "comments": "Identical"
-                    })
-                    stats['identical'] += 1
-                    stats['total'] += 1
-                    row_id += 1
-            
-            elif tag == 'replace':
-                # Blocks changed - but how much?
-                max_blocks = max(i2 - i1, j2 - j1)
+            # Score this block against all blocks in B
+            for idx_b, block_b in enumerate(self.blocks_b):
+                # Skip if already matched
+                if idx_b not in self.unmatched_b:
+                    continue
                 
-                for i in range(max_blocks):
-                    a_block = blocks_a[i1 + i] if i1 + i < i2 else ""
-                    b_block = blocks_b[j1 + i] if j1 + i < j2 else ""
-                    
-                    if a_block and b_block:
-                        # Both exist - calculate similarity
-                        similarity = calculate_similarity(a_block, b_block)
-                        category = categorize_change(similarity, self.threshold, self.threshold - 10)
-                        
-                        stats['similarity_scores'].append(similarity)
-                        
-                        if category == "SAME":
-                            # Very similar - probably same block
-                            rows.append({
-                                "row_id": f"R{row_id}",
-                                "tag": f"Block {i1 + i + 1}",
-                                "pdf_a_content": a_block[:150],
-                                "pdf_b_content": b_block[:150],
-                                "similarity": round(similarity, 1),
-                                "status": "NO CHANGE",
-                                "comments": f"Essentially same ({similarity:.0f}% match)"
-                            })
-                            stats['identical'] += 1
-                        
-                        elif category == "SIMILAR":
-                            # Similar but with changes
-                            b_bold = self._highlight_differences(a_block, b_block)
-                            rows.append({
-                                "row_id": f"R{row_id}",
-                                "tag": f"Block {i1 + i + 1}",
-                                "pdf_a_content": a_block[:150],
-                                "pdf_b_content": b_bold[:150],
-                                "similarity": round(similarity, 1),
-                                "status": "MINOR_CHANGE",
-                                "comments": f"Minor variations ({similarity:.0f}% match)"
-                            })
-                            stats['minor_variation'] += 1
-                        
-                        else:
-                            # Real change
-                            b_bold = self._highlight_differences(a_block, b_block)
-                            rows.append({
-                                "row_id": f"R{row_id}",
-                                "tag": f"Block {i1 + i + 1}",
-                                "pdf_a_content": a_block[:150],
-                                "pdf_b_content": b_bold[:150],
-                                "similarity": round(similarity, 1),
-                                "status": "MODIFIED",
-                                "comments": f"Significant change ({similarity:.0f}% match)"
-                            })
-                            stats['modified'] += 1
-                        
-                        stats['total'] += 1
-                        row_id += 1
-                    
-                    elif a_block and not b_block:
-                        # Deleted
-                        rows.append({
-                            "row_id": f"R{row_id}",
-                            "tag": f"Block {i1 + i + 1}",
-                            "pdf_a_content": a_block[:150],
-                            "pdf_b_content": "❌ [DELETED]",
-                            "similarity": 0.0,
-                            "status": "DELETED",
-                            "comments": "Content removed"
-                        })
-                        stats['deleted'] += 1
-                        stats['total'] += 1
-                        row_id += 1
-                    
-                    elif not a_block and b_block:
-                        # Added
-                        rows.append({
-                            "row_id": f"R{row_id}",
-                            "tag": f"Block New",
-                            "pdf_a_content": "",
-                            "pdf_b_content": f"✅ **{b_block[:150]}**",
-                            "similarity": 0.0,
-                            "status": "ADDED",
-                            "comments": "New content"
-                        })
-                        stats['added'] += 1
-                        stats['total'] += 1
-                        row_id += 1
+                # Calculate similarity
+                similarity = self._calculate_similarity(block_a, block_b)
+                
+                # Keep track of best match
+                if similarity > best_similarity:
+                    best_similarity = similarity
+                    best_match_idx = idx_b
             
-            elif tag == 'delete':
-                # Blocks deleted
-                for i in range(i2 - i1):
-                    rows.append({
-                        "row_id": f"R{row_id}",
-                        "tag": f"Block {i1 + i + 1}",
-                        "pdf_a_content": blocks_a[i1 + i][:150],
-                        "pdf_b_content": "❌ [DELETED]",
-                        "similarity": 0.0,
-                        "status": "DELETED",
-                        "comments": "Content removed"
-                    })
-                    stats['deleted'] += 1
-                    stats['total'] += 1
-                    row_id += 1
+            # If we found a match above threshold, record it
+            if best_match_idx is not None and best_similarity >= similarity_threshold:
+                matches.append({
+                    'idx_a': idx_a,
+                    'idx_b': best_match_idx,
+                    'block_a': block_a,
+                    'block_b': self.blocks_b[best_match_idx],
+                    'similarity': best_similarity
+                })
+                
+                # Mark as matched
+                self.unmatched_a.discard(idx_a)
+                self.unmatched_b.discard(best_match_idx)
             
-            elif tag == 'insert':
-                # Blocks added
-                for i in range(j2 - j1):
-                    rows.append({
-                        "row_id": f"R{row_id}",
-                        "tag": f"Block New",
-                        "pdf_a_content": "",
-                        "pdf_b_content": f"✅ **{blocks_b[j1 + i][:150]}**",
-                        "similarity": 0.0,
-                        "status": "ADDED",
-                        "comments": "New content"
-                    })
-                    stats['added'] += 1
-                    stats['total'] += 1
-                    row_id += 1
+            else:
+                # No good match found
+                self.unmatched_a.discard(idx_a)
         
-        return rows, stats
+        return matches
     
-    def _highlight_differences(self, text_a: str, text_b: str) -> str:
-        """Highlight changed parts"""
+    def get_unmatched_a(self) -> List[Dict]:
+        """Get blocks from PDF A that weren't matched (deleted)"""
+        unmatched = []
+        for idx in self.unmatched_a:
+            unmatched.append({
+                'idx': idx,
+                'block': self.blocks_a[idx],
+                'type': 'DELETED'
+            })
+        return unmatched
+    
+    def get_unmatched_b(self) -> List[Dict]:
+        """Get blocks from PDF B that weren't matched (added)"""
+        unmatched = []
+        for idx in self.unmatched_b:
+            unmatched.append({
+                'idx': idx,
+                'block': self.blocks_b[idx],
+                'type': 'ADDED'
+            })
+        return unmatched
+    
+    def _calculate_similarity(self, text_a: str, text_b: str) -> float:
+        """
+        Calculate similarity between two blocks (0-100).
+        
+        Uses multiple methods:
+        1. Exact character matching (SequenceMatcher)
+        2. Normalized comparison (spaces removed)
+        3. Partial matching (if one is substring of other)
+        """
+        
         if not text_a or not text_b:
-            return f"**{text_b}**"
+            return 0.0
         
-        matcher = difflib.SequenceMatcher(None, text_a, text_b)
-        result = []
+        # Method 1: Direct character comparison
+        import difflib
+        ratio = difflib.SequenceMatcher(None, text_a, text_b).ratio()
+        similarity_direct = ratio * 100
         
-        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-            if tag == 'equal':
-                result.append(text_b[j1:j2])
-            elif tag in ['replace', 'insert']:
-                result.append(f"**{text_b[j1:j2]}**")
+        # Method 2: Normalized comparison (remove extra spaces)
+        text_a_norm = ' '.join(text_a.split())
+        text_b_norm = ' '.join(text_b.split())
         
-        return ''.join(result)
+        if text_a_norm == text_b_norm:
+            return 100.0  # Exact match after normalization
+        
+        ratio_norm = difflib.SequenceMatcher(None, text_a_norm, text_b_norm).ratio()
+        similarity_norm = ratio_norm * 100
+        
+        # Method 3: Check if one contains the other (for partial matches)
+        min_len = min(len(text_a_norm), len(text_b_norm))
+        max_len = max(len(text_a_norm), len(text_b_norm))
+        
+        if text_a_norm in text_b_norm or text_b_norm in text_a_norm:
+            # Substring match - adjust score based on length ratio
+            similarity_partial = (min_len / max_len) * 100
+        else:
+            similarity_partial = 0
+        
+        # Return best score from all methods
+        return max(similarity_direct, similarity_norm, similarity_partial)
 
 # ============================================================================
-# TEXT EXTRACTION (simplified - use from previous version)
+# TEXT EXTRACTION
 # ============================================================================
 
 def extract_text(file) -> str:
@@ -273,26 +169,155 @@ def extract_text(file) -> str:
     except Exception as e:
         raise Exception(f"Failed to extract text: {str(e)}")
 
-def split_into_blocks(text):
-    """Split text into blocks (sentences/paragraphs)"""
+def split_into_blocks(text) -> List[str]:
+    """
+    Split text into meaningful blocks.
+    
+    Blocks are:
+    - Paragraphs (separated by blank lines)
+    - Sentences (ending with . ! ?)
+    - But preserves natural grouping
+    """
     blocks = []
     
-    # Split by paragraph breaks first
-    sections = text.split('\n\n')
+    # First, split by paragraph (double newlines)
+    paragraphs = text.split('\n\n')
     
-    for section in sections:
-        if not section.strip():
+    for para in paragraphs:
+        if not para.strip():
             continue
         
-        # Split by sentence endings
-        sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', section.strip())
+        # Clean up the paragraph
+        para = para.strip()
+        
+        # Split by sentence ending, but keep sentences together
+        # Match . ! ? followed by space and uppercase letter
+        sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', para)
         
         for sent in sentences:
             sent = sent.strip()
-            if sent:
+            # Only keep substantial blocks (>10 chars)
+            if len(sent) > 10:
                 blocks.append(sent)
+            # For very short blocks, try to group them
+            elif sent and blocks and len(blocks[-1]) < 100:
+                blocks[-1] += ' ' + sent
     
     return blocks
+
+# ============================================================================
+# COMPARISON AND REPORTING
+# ============================================================================
+
+def generate_comparison_report(blocks_a: List[str], blocks_b: List[str]) -> Tuple[List[Dict], Dict]:
+    """
+    Generate full comparison report with intelligent block matching.
+    
+    Returns: (report_rows, summary_stats)
+    """
+    
+    # Match blocks
+    matcher = BlockMatcher(blocks_a, blocks_b)
+    matched_pairs = matcher.match_blocks(similarity_threshold=75)
+    deleted_blocks = matcher.get_unmatched_a()
+    added_blocks = matcher.get_unmatched_b()
+    
+    report_rows = []
+    row_id = 1
+    
+    # ===== MATCHED BLOCKS =====
+    for match in matched_pairs:
+        idx_a = match['idx_a']
+        block_a = match['block_a']
+        block_b = match['block_b']
+        similarity = match['similarity']
+        
+        # Determine status based on similarity
+        if similarity >= 98:
+            status = "NO CHANGE"
+            comments = f"Identical ({similarity:.0f}% match)"
+        elif similarity >= 90:
+            status = "NO CHANGE"
+            comments = f"Essentially same ({similarity:.0f}% match)"
+        elif similarity >= 85:
+            status = "MINOR_CHANGE"
+            comments = f"Minor variation ({similarity:.0f}% match)"
+        else:
+            status = "MODIFIED"
+            comments = f"Changed ({similarity:.0f}% match)"
+        
+        # Highlight differences
+        if similarity < 98:
+            block_b_display = highlight_differences(block_a, block_b)
+        else:
+            block_b_display = block_b
+        
+        report_rows.append({
+            "row_id": f"R{row_id}",
+            "tag": f"Block {idx_a + 1}",
+            "pdf_a_content": block_a[:120],
+            "pdf_b_content": block_b_display[:120],
+            "status": status,
+            "comments": comments
+        })
+        row_id += 1
+    
+    # ===== DELETED BLOCKS (in A but not matched in B) =====
+    for deleted in deleted_blocks:
+        report_rows.append({
+            "row_id": f"R{row_id}",
+            "tag": f"Block {deleted['idx'] + 1}",
+            "pdf_a_content": deleted['block'][:120],
+            "pdf_b_content": "❌ [DELETED]",
+            "status": "DELETED",
+            "comments": "Content removed from PDF 2"
+        })
+        row_id += 1
+    
+    # ===== ADDED BLOCKS (in B but not matched in A) =====
+    for added in added_blocks:
+        report_rows.append({
+            "row_id": f"R{row_id}",
+            "tag": f"Block New",
+            "pdf_a_content": "",
+            "pdf_b_content": f"✅ **{added['block'][:120]}**",
+            "status": "ADDED",
+            "comments": "New content in PDF 2"
+        })
+        row_id += 1
+    
+    # Generate summary stats
+    summary = {
+        "total_blocks": len(report_rows),
+        "no_change": sum(1 for r in report_rows if r['status'] == 'NO CHANGE'),
+        "minor_change": sum(1 for r in report_rows if r['status'] == 'MINOR_CHANGE'),
+        "modified": sum(1 for r in report_rows if r['status'] == 'MODIFIED'),
+        "added": sum(1 for r in report_rows if r['status'] == 'ADDED'),
+        "deleted": sum(1 for r in report_rows if r['status'] == 'DELETED'),
+        "matched_blocks": len(matched_pairs),
+        "unmatched_from_a": len(deleted_blocks),
+        "unmatched_from_b": len(added_blocks)
+    }
+    
+    return report_rows, summary
+
+def highlight_differences(text_a: str, text_b: str) -> str:
+    """Highlight only the changed parts with bold"""
+    import difflib
+    
+    if not text_a or not text_b:
+        return f"**{text_b}**"
+    
+    matcher = difflib.SequenceMatcher(None, text_a, text_b)
+    result = []
+    
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            result.append(text_b[j1:j2])
+        elif tag in ['replace', 'insert']:
+            result.append(f"**{text_b[j1:j2]}**")
+    
+    return ''.join(result)
 
 # ============================================================================
 # FLASK ENDPOINTS
@@ -300,7 +325,7 @@ def split_into_blocks(text):
 
 @app.route("/")
 def home():
-    return jsonify({"status": "API running - Fuzzy Match Comparison"})
+    return jsonify({"status": "API running - Intelligent Block Matching"})
 
 @app.route("/compare", methods=["POST"])
 def compare():
@@ -328,35 +353,23 @@ def compare():
         blocks_a = split_into_blocks(text_a)
         blocks_b = split_into_blocks(text_b)
         
-        # Compare with fuzzy matching (threshold: 85%)
-        comparator = FuzzyComparator(threshold_show_change=85)
-        comparison_rows, stats = comparator.compare(blocks_a, blocks_b)
+        if not blocks_a or not blocks_b:
+            return jsonify({"error": "Could not extract blocks from PDFs"}), 400
         
-        # Filter out the similarity field for frontend compatibility
-        # Keep only fields the frontend expects
-        clean_rows = []
-        for row in comparison_rows:
-            clean_row = {
-                "row_id": row.get("row_id"),
-                "tag": row.get("tag"),
-                "pdf_a_content": row.get("pdf_a_content"),
-                "pdf_b_content": row.get("pdf_b_content"),
-                "status": row.get("status"),
-                "comments": row.get("comments")
-            }
-            clean_rows.append(clean_row)
+        # Generate full comparison report
+        report_rows, summary = generate_comparison_report(blocks_a, blocks_b)
         
         return jsonify({
             "report": {
                 "document_type": "pdf_comparison",
-                "purpose": "Fuzzy match comparison - only shows real changes",
-                "comparison_table": clean_rows,
+                "purpose": "Intelligent block matching comparison",
+                "comparison_table": report_rows,
                 "summary": {
-                    "total_rows": stats['total'],
-                    "no_change": stats['identical'],
-                    "modified": stats['modified'],
-                    "added": stats['added'],
-                    "deleted": stats['deleted']
+                    "total_rows": summary['total_blocks'],
+                    "no_change": summary['no_change'],
+                    "modified": summary['modified'],
+                    "added": summary['added'],
+                    "deleted": summary['deleted']
                 }
             }
         })
@@ -391,38 +404,52 @@ def summary():
         blocks_a = split_into_blocks(text_a)
         blocks_b = split_into_blocks(text_b)
         
-        # Fuzzy comparison
-        comparator = FuzzyComparator(threshold_show_change=85)
-        comparison_rows, stats = comparator.compare(blocks_a, blocks_b)
+        report_rows, summary = generate_comparison_report(blocks_a, blocks_b)
         
-        # Only include real changes (skip MINOR_CHANGE and NO CHANGE)
-        important_changes = [r for r in comparison_rows 
-                           if r.get('status') in ['MODIFIED', 'ADDED', 'DELETED']]
+        # Build changes list for AI
+        real_changes = [r for r in report_rows 
+                       if r['status'] in ['MODIFIED', 'ADDED', 'DELETED']]
         
         changes_detail = []
-        for i, change in enumerate(important_changes[:30], 1):
+        for i, change in enumerate(real_changes[:40], 1):
             status = change.get('status', '')
             pdf1 = change.get('pdf_a_content', '')
             pdf2 = change.get('pdf_b_content', '').replace('**', '').replace('❌', '').replace('✅', '').strip()
+            comments = change.get('comments', '')
             
             if status == 'DELETED':
-                changes_detail.append(f"{i}. [ ] PDF 1: \"{pdf1}\"   PDF 2: ❌ [DELETED]   ACTION: Verify")
+                changes_detail.append(f"{i}. [ ] PDF 1: \"{pdf1}\"")
+                changes_detail.append(f"       PDF 2: ❌ [DELETED]")
+                changes_detail.append(f"       ACTION: Verify removal")
             elif status == 'ADDED':
-                changes_detail.append(f"{i}. [ ] PDF 1: [NEW]   PDF 2: \"{pdf2}\"   ACTION: Verify")
+                changes_detail.append(f"{i}. [ ] PDF 1: [NEW]")
+                changes_detail.append(f"       PDF 2: \"{pdf2}\"")
+                changes_detail.append(f"       ACTION: Verify addition")
             elif status == 'MODIFIED':
-                changes_detail.append(f"{i}. [ ] PDF 1: \"{pdf1}\"   PDF 2: \"{pdf2}\"   ACTION: Verify")
+                changes_detail.append(f"{i}. [ ] PDF 1: \"{pdf1}\"")
+                changes_detail.append(f"       PDF 2: \"{pdf2}\"")
+                changes_detail.append(f"       {comments}")
+                changes_detail.append(f"       ACTION: Verify change")
         
-        changes_text = "\n".join(changes_detail) if changes_detail else "No real changes detected"
+        changes_text = "\n".join(changes_detail) if changes_detail else "No changes detected"
         
-        qc_prompt = f"""Professional QC checklist of actual changes between PDFs.
+        qc_prompt = f"""Create a professional QC checklist from this PDF comparison.
 
-CHANGES FOUND:
-{changes_text if changes_detail else "No real changes detected"}
+DETECTED CHANGES (via intelligent block matching):
+{changes_text}
 
-Format response as a checkbox list:
-[ ] PDF 1: "old text"   PDF 2: "new text"   ACTION: Verify
+SUMMARY:
+- Total blocks: {summary['total_blocks']}
+- No changes: {summary['no_change']}
+- Modified: {summary['modified']}
+- Added: {summary['added']}
+- Deleted: {summary['deleted']}
 
-Keep professional and specific. Only include actual changes."""
+Format as clear checkbox list:
+[ ] Item 1: PDF 1 says "X" | PDF 2 says "Y" | ACTION: Verify
+
+Make it easy for a QC person to print and check off each item.
+Be specific and professional."""
 
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -433,7 +460,7 @@ Keep professional and specific. Only include actual changes."""
             "model": "gpt-3.5-turbo",
             "messages": [{"role": "user", "content": qc_prompt}],
             "temperature": 0.3,
-            "max_tokens": 2000
+            "max_tokens": 2500
         }
         
         response = requests.post(
@@ -450,6 +477,7 @@ Keep professional and specific. Only include actual changes."""
         summary_text = result["choices"][0]["message"]["content"]
         
         return jsonify({"summary": summary_text})
+    
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
