@@ -1,11 +1,11 @@
 """
-PREMIUM PDF COMPARISON WITH WORD-LEVEL DIFFING
+LAYOUT-AWARE PDF COMPARISON WITH INTELLIGENT BLOCK PAIRING
 
-Achieves perfect pack copy verification by:
-1. Comparing blocks word-by-word (not just similarity score)
-2. Detecting critical fields (allergens, weights, dates, etc.)
-3. Showing EXACTLY what changed in clear format
-4. Generating professional QC reports with proper formatting
+Solves the matching problem by:
+1. Using word coordinates to group text by position
+2. Creating semantic blocks (not just line breaks)
+3. Matching blocks by position first, then content
+4. Showing every difference including minor ones
 """
 
 from flask import Flask, request, jsonify
@@ -24,66 +24,233 @@ CORS(app)
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
 # ============================================================================
-# WORD-LEVEL COMPARISON ENGINE
+# LAYOUT-AWARE TEXT EXTRACTION
 # ============================================================================
 
-class WordLevelComparator:
-    """Compares blocks at word level for precise diff detection"""
+class LayoutAwareExtractor:
+    """Extracts text using word coordinates for better structure preservation"""
     
-    # Critical fields that MUST be flagged
-    CRITICAL_PATTERNS = {
-        'ALLERGEN': r'(allerg|contain|may contain|traces?|gluten|dairy|nuts|peanuts|sesame|soy)',
-        'WEIGHT': r'(\d+\.?\d*\s*(?:g|kg|mg|ml|oz|lb))',
-        'PERCENTAGE': r'(\d+\.?\d*\s*%)',
-        'DATE': r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
-        'TEMPERATURE': r'(°?c|-\d+|freeze|fridge)',
-        'BARCODE': r'(\d{12,14})',
-    }
+    def __init__(self, page):
+        self.page = page
     
-    def compare_blocks(self, block_a: str, block_b: str) -> Dict:
+    def extract_structured_text(self) -> str:
         """
-        Compare two blocks word-by-word.
-        
-        Returns detailed diff with:
-        - Word-level changes
-        - Critical field flags
-        - Change severity
-        - Visual diff
+        Extract text using word coordinates to preserve structure.
+        Groups words by Y position (lines) then recreates natural blocks.
         """
         
-        if block_a == block_b:
+        words = self.page.extract_words()
+        
+        if not words or len(words) < 5:
+            # Fallback to simple extraction
+            return self.page.extract_text() or ""
+        
+        # Group words by Y position (lines)
+        lines = self._group_by_y_position(words)
+        
+        # Convert lines to text
+        text_lines = []
+        for line_words in lines:
+            # Sort by X position (left to right)
+            line_words.sort(key=lambda w: w['x0'])
+            line_text = ' '.join([w['text'] for w in line_words])
+            if line_text.strip():
+                text_lines.append(line_text)
+        
+        # Join with newlines to preserve structure
+        return '\n'.join(text_lines)
+    
+    def _group_by_y_position(self, words, tolerance=5):
+        """Group words that are on approximately the same Y position"""
+        lines = defaultdict(list)
+        
+        for word in words:
+            # Round Y position to nearest tolerance
+            y_key = round(word['top'] / tolerance) * tolerance
+            lines[y_key].append(word)
+        
+        # Return lines sorted by Y position
+        return [lines[y] for y in sorted(lines.keys())]
+
+# ============================================================================
+# INTELLIGENT BLOCK CREATION
+# ============================================================================
+
+def create_semantic_blocks(text: str) -> List[Dict]:
+    """
+    Create semantic blocks with position information.
+    
+    Instead of simple string blocks, returns blocks with metadata
+    to aid matching.
+    """
+    
+    blocks = []
+    current_block = []
+    current_y = None
+    
+    lines = text.split('\n')
+    
+    for i, line in enumerate(lines):
+        line = line.strip()
+        
+        if not line:
+            # Blank line = block boundary
+            if current_block:
+                block_text = '\n'.join(current_block)
+                if len(block_text) > 10:  # Only keep substantial blocks
+                    blocks.append({
+                        'text': block_text,
+                        'line_start': i - len(current_block),
+                        'line_end': i,
+                        'line_count': len(current_block),
+                        'char_count': len(block_text)
+                    })
+                current_block = []
+                current_y = None
+        else:
+            current_block.append(line)
+    
+    # Don't forget last block
+    if current_block:
+        block_text = '\n'.join(current_block)
+        if len(block_text) > 10:
+            blocks.append({
+                'text': block_text,
+                'line_start': len(lines) - len(current_block),
+                'line_end': len(lines),
+                'line_count': len(current_block),
+                'char_count': len(block_text)
+            })
+    
+    return blocks
+
+# ============================================================================
+# INTELLIGENT BLOCK MATCHING WITH POSITION HINTS
+# ============================================================================
+
+class SmartBlockMatcher:
+    """Matches blocks using position + content similarity"""
+    
+    def __init__(self, blocks_a: List[Dict], blocks_b: List[Dict]):
+        self.blocks_a = blocks_a
+        self.blocks_b = blocks_b
+    
+    def match_blocks(self) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+        """
+        Match blocks intelligently:
+        1. Start with blocks at similar positions (position hint)
+        2. Then verify with content similarity
+        3. Handle deletions/additions
+        
+        Returns: (matched_pairs, deleted, added)
+        """
+        
+        matched_pairs = []
+        matched_b_indices = set()
+        
+        # Try to match each block in A
+        for idx_a, block_a in enumerate(self.blocks_a):
+            best_match_idx = None
+            best_score = 0
+            best_diff = None
+            
+            # Calculate position hint (normalized)
+            pos_hint_a = block_a['line_start'] / max(1, len(self.blocks_a))
+            
+            for idx_b, block_b in enumerate(self.blocks_b):
+                # Skip if already matched
+                if idx_b in matched_b_indices:
+                    continue
+                
+                # Position hint - blocks at similar positions more likely to match
+                pos_hint_b = block_b['line_start'] / max(1, len(self.blocks_b))
+                position_similarity = 100 - (abs(pos_hint_a - pos_hint_b) * 100)
+                
+                # Content similarity
+                content_similarity = self._calculate_similarity(
+                    block_a['text'], 
+                    block_b['text']
+                )
+                
+                # Combined score: 70% content, 30% position
+                combined_score = (content_similarity * 0.7) + (position_similarity * 0.3)
+                
+                if combined_score > best_score:
+                    best_score = combined_score
+                    best_match_idx = idx_b
+                    best_diff = self._create_detailed_diff(
+                        block_a['text'], 
+                        block_b['text']
+                    )
+            
+            # If good match found, record it
+            if best_match_idx is not None and best_score >= 60:  # Lower threshold
+                matched_pairs.append({
+                    'idx_a': idx_a,
+                    'idx_b': best_match_idx,
+                    'block_a': block_a,
+                    'block_b': self.blocks_b[best_match_idx],
+                    'score': best_score,
+                    'diff': best_diff
+                })
+                matched_b_indices.add(best_match_idx)
+        
+        # Unmatched blocks
+        matched_a_indices = {m['idx_a'] for m in matched_pairs}
+        deleted = [
+            block for i, block in enumerate(self.blocks_a) 
+            if i not in matched_a_indices
+        ]
+        
+        added = [
+            block for i, block in enumerate(self.blocks_b) 
+            if i not in matched_b_indices
+        ]
+        
+        return matched_pairs, deleted, added
+    
+    def _calculate_similarity(self, text_a: str, text_b: str) -> float:
+        """Calculate similarity 0-100"""
+        if not text_a or not text_b:
+            return 0.0
+        
+        # Normalize
+        a_norm = ' '.join(text_a.split())
+        b_norm = ' '.join(text_b.split())
+        
+        if a_norm == b_norm:
+            return 100.0
+        
+        ratio = SequenceMatcher(None, a_norm, b_norm).ratio()
+        return ratio * 100
+    
+    def _create_detailed_diff(self, text_a: str, text_b: str) -> Dict:
+        """Create character-level diff showing every change"""
+        
+        if text_a == text_b:
             return {
                 'status': 'NO CHANGE',
                 'similarity': 100.0,
-                'word_changes': 0,
-                'critical_flags': [],
-                'word_diff': block_a,
-                'summary': 'Identical blocks'
+                'diff_html': text_a,
+                'changes': []
             }
         
-        # Split into words
-        words_a = block_a.split()
-        words_b = block_b.split()
+        # Normalize for comparison
+        a_norm = ' '.join(text_a.split())
+        b_norm = ' '.join(text_b.split())
         
-        # Word-level diff
-        matcher = SequenceMatcher(None, words_a, words_b)
+        similarity = (SequenceMatcher(None, a_norm, b_norm).ratio()) * 100
         
-        # Calculate stats
-        similarity = matcher.ratio() * 100
-        word_changes = sum(1 for op in matcher.get_opcodes() if op[0] != 'equal')
+        # Build character-level diff
+        diff_html = self._build_char_diff(text_a, text_b)
         
-        # Detect critical field changes
-        critical_flags = self._detect_critical_changes(block_a, block_b)
-        
-        # Build visual diff
-        word_diff_html = self._build_word_diff(words_a, words_b)
+        # Extract specific changes
+        changes = self._extract_changes(text_a, text_b)
         
         # Determine status
         if similarity >= 98:
             status = 'NO CHANGE'
         elif similarity >= 90:
-            status = 'MINOR_CHANGE'
-        elif similarity >= 85 and len(critical_flags) == 0:
             status = 'MINOR_CHANGE'
         else:
             status = 'MODIFIED'
@@ -91,228 +258,122 @@ class WordLevelComparator:
         return {
             'status': status,
             'similarity': round(similarity, 1),
-            'word_changes': word_changes,
-            'critical_flags': critical_flags,
-            'word_diff': word_diff_html,
-            'block_a': block_a,
-            'block_b': block_b,
-            'summary': self._generate_summary(status, similarity, critical_flags, word_changes)
+            'diff_html': diff_html,
+            'changes': changes
         }
     
-    def _detect_critical_changes(self, block_a: str, block_b: str) -> List[str]:
-        """Detect changes in critical fields"""
-        flags = []
+    def _build_char_diff(self, text_a: str, text_b: str) -> str:
+        """Build character-level diff with markup"""
         
-        for field_type, pattern in self.CRITICAL_PATTERNS.items():
-            values_a = re.findall(pattern, block_a, re.IGNORECASE)
-            values_b = re.findall(pattern, block_b, re.IGNORECASE)
-            
-            if values_a != values_b:
-                # Critical field changed
-                flags.append({
-                    'type': field_type,
-                    'before': values_a[0] if values_a else 'N/A',
-                    'after': values_b[0] if values_b else 'N/A'
-                })
-        
-        return flags
-    
-    def _build_word_diff(self, words_a: List[str], words_b: List[str]) -> str:
-        """Build word-by-word diff visualization"""
-        matcher = SequenceMatcher(None, words_a, words_b)
-        
+        matcher = SequenceMatcher(None, text_a, text_b)
         result = []
         
         for tag, i1, i2, j1, j2 in matcher.get_opcodes():
             if tag == 'equal':
-                result.extend(words_b[j1:j2])
+                result.append(text_b[j1:j2])
             elif tag == 'delete':
-                # Deleted words
-                for word in words_a[i1:i2]:
-                    result.append(f"~~{word}~~")
+                # Deleted - show strikethrough
+                deleted = text_a[i1:i2]
+                result.append(f'~~{deleted}~~')
             elif tag == 'insert':
-                # New words
-                for word in words_b[j1:j2]:
-                    result.append(f"**{word}**")
+                # Added - show bold
+                added = text_b[j1:j2]
+                result.append(f'**{added}**')
             elif tag == 'replace':
-                # Changed words
-                for word in words_b[j1:j2]:
-                    result.append(f"**{word}**")
+                # Changed - show bold
+                changed = text_b[j1:j2]
+                result.append(f'**{changed}**')
         
-        return ' '.join(result)
+        return ''.join(result)
     
-    def _generate_summary(self, status: str, similarity: float, 
-                         critical_flags: List, word_changes: int) -> str:
-        """Generate human-readable summary"""
+    def _extract_changes(self, text_a: str, text_b: str) -> List[Dict]:
+        """Extract specific changes from diff"""
+        changes = []
         
-        if status == 'NO CHANGE':
-            return 'Identical'
+        matcher = SequenceMatcher(None, text_a, text_b)
         
-        summary_parts = [f"{similarity:.0f}% match"]
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == 'replace':
+                changes.append({
+                    'type': 'MODIFIED',
+                    'before': text_a[i1:i2],
+                    'after': text_b[j1:j2]
+                })
+            elif tag == 'delete':
+                changes.append({
+                    'type': 'DELETED',
+                    'before': text_a[i1:i2],
+                    'after': ''
+                })
+            elif tag == 'insert':
+                changes.append({
+                    'type': 'ADDED',
+                    'before': '',
+                    'after': text_b[j1:j2]
+                })
         
-        if word_changes > 0:
-            summary_parts.append(f"{word_changes} word(s) changed")
-        
-        if critical_flags:
-            flag_types = ', '.join([f['type'] for f in critical_flags])
-            summary_parts.append(f"⚠️ {flag_types} changed")
-        
-        return ' | '.join(summary_parts)
+        return changes
 
 # ============================================================================
-# TEXT EXTRACTION & BLOCKING
+# TEXT EXTRACTION
 # ============================================================================
 
-def extract_text(file) -> str:
-    """Extract text from PDF"""
+def extract_text_with_layout(file) -> str:
+    """Extract text preserving layout structure"""
     try:
         if hasattr(file, 'seek'):
             file.seek(0)
         
         with pdfplumber.open(file) as pdf:
-            text = ""
+            all_text = ""
+            
             for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
-        return text
+                try:
+                    # Try layout-aware extraction
+                    extractor = LayoutAwareExtractor(page)
+                    page_text = extractor.extract_structured_text()
+                    all_text += page_text + "\n\n"
+                except Exception as e:
+                    # Fallback to simple extraction
+                    print(f"Layout extraction failed: {str(e)}")
+                    text = page.extract_text()
+                    if text:
+                        all_text += text + "\n\n"
+            
+            return all_text
+    
     except Exception as e:
         raise Exception(f"Failed to extract text: {str(e)}")
-
-def split_into_blocks(text) -> List[str]:
-    """
-    Split text into meaningful blocks for QC comparison.
-    
-    Blocks are roughly paragraph-sized for accurate comparison.
-    """
-    blocks = []
-    
-    # First split by paragraph breaks
-    paragraphs = text.split('\n\n')
-    
-    for para in paragraphs:
-        if not para.strip():
-            continue
-        
-        para = para.strip()
-        
-        # Split by sentence endings
-        sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', para)
-        
-        for sent in sentences:
-            sent = sent.strip()
-            if len(sent) > 8:  # Only keep substantial blocks
-                blocks.append(sent)
-    
-    return blocks
-
-# ============================================================================
-# INTELLIGENT BLOCK MATCHING (Enhanced)
-# ============================================================================
-
-class EnhancedBlockMatcher:
-    """Enhanced matcher with word-level comparison"""
-    
-    def __init__(self, blocks_a: List[str], blocks_b: List[str]):
-        self.blocks_a = blocks_a
-        self.blocks_b = blocks_b
-        self.comparator = WordLevelComparator()
-        self.matches = []
-    
-    def match_blocks(self, threshold=75) -> Tuple[List[Dict], List[Dict], List[Dict]]:
-        """
-        Match blocks with word-level comparison.
-        
-        Returns: (matched_pairs, deleted_blocks, added_blocks)
-        """
-        matched_pairs = []
-        matched_b = set()
-        
-        # For each block in A, find best match in B
-        for idx_a, block_a in enumerate(self.blocks_a):
-            best_match_idx = None
-            best_score = 0
-            best_comparison = None
-            
-            for idx_b, block_b in enumerate(self.blocks_b):
-                if idx_b in matched_b:
-                    continue
-                
-                # Compare blocks word-by-word
-                comparison = self.comparator.compare_blocks(block_a, block_b)
-                similarity = comparison['similarity']
-                
-                if similarity > best_score:
-                    best_score = similarity
-                    best_match_idx = idx_b
-                    best_comparison = comparison
-            
-            # If good match found, record it
-            if best_match_idx is not None and best_score >= threshold:
-                matched_pairs.append({
-                    'idx_a': idx_a,
-                    'idx_b': best_match_idx,
-                    'block_a': block_a,
-                    'block_b': self.blocks_b[best_match_idx],
-                    'comparison': best_comparison
-                })
-                matched_b.add(best_match_idx)
-        
-        # Get unmatched blocks
-        matched_a = {m['idx_a'] for m in matched_pairs}
-        deleted_blocks = [
-            {'idx': i, 'block': self.blocks_a[i]}
-            for i in range(len(self.blocks_a)) if i not in matched_a
-        ]
-        
-        added_blocks = [
-            {'idx': i, 'block': self.blocks_b[i]}
-            for i in range(len(self.blocks_b)) if i not in matched_b
-        ]
-        
-        return matched_pairs, deleted_blocks, added_blocks
 
 # ============================================================================
 # REPORT GENERATION
 # ============================================================================
 
-def generate_professional_report(blocks_a: List[str], blocks_b: List[str]) -> Tuple[List[Dict], Dict]:
-    """Generate professional QC report"""
+def generate_comparison_report(blocks_a: List[Dict], blocks_b: List[Dict]) -> Tuple[List[Dict], Dict]:
+    """Generate comprehensive comparison report"""
     
-    matcher = EnhancedBlockMatcher(blocks_a, blocks_b)
-    matched_pairs, deleted_blocks, added_blocks = matcher.match_blocks(threshold=70)
+    matcher = SmartBlockMatcher(blocks_a, blocks_b)
+    matched_pairs, deleted_blocks, added_blocks = matcher.match_blocks()
     
     report_rows = []
     row_id = 1
     
-    # ===== MATCHED BLOCKS WITH WORD-LEVEL DIFF =====
+    # Sort matched pairs by position
+    matched_pairs.sort(key=lambda m: m['idx_a'])
+    
+    # ===== MATCHED PAIRS =====
     for match in matched_pairs:
-        comparison = match['comparison']
+        diff = match['diff']
         
-        # Only show if there's actual change
-        if comparison['status'] == 'NO CHANGE' and len(comparison['critical_flags']) == 0:
-            # Skip identical blocks (too many in report)
-            continue
-        
-        # Build detailed diff
-        if comparison['critical_flags']:
-            # Critical field changed - show with flags
-            flag_details = []
-            for flag in comparison['critical_flags']:
-                flag_details.append(f"[{flag['type']}: {flag['before']} → {flag['after']}]")
-            
-            pdf_b_display = f"{comparison['block_b']}\n⚠️ {' '.join(flag_details)}"
-        else:
-            pdf_b_display = comparison['word_diff']
-        
+        # Show all changes, even minor ones
         report_rows.append({
             "row_id": f"R{row_id}",
             "tag": f"Block {match['idx_a'] + 1}",
-            "pdf_a_content": comparison['block_a'][:130],
-            "pdf_b_content": pdf_b_display[:130],
-            "status": comparison['status'],
-            "comments": comparison['summary'],
-            "is_critical": len(comparison['critical_flags']) > 0
+            "pdf_a_content": match['block_a']['text'][:150],
+            "pdf_b_content": diff['diff_html'][:150],
+            "status": diff['status'],
+            "comments": f"{diff['similarity']:.0f}% match | {len(diff['changes'])} change(s)",
+            "full_diff": diff
         })
         row_id += 1
     
@@ -320,12 +381,11 @@ def generate_professional_report(blocks_a: List[str], blocks_b: List[str]) -> Tu
     for deleted in deleted_blocks:
         report_rows.append({
             "row_id": f"R{row_id}",
-            "tag": f"Block {deleted['idx'] + 1}",
-            "pdf_a_content": deleted['block'][:130],
+            "tag": f"Block {deleted['line_start']}",
+            "pdf_a_content": deleted['text'][:150],
             "pdf_b_content": "❌ [DELETED]",
             "status": "DELETED",
-            "comments": "This block was removed",
-            "is_critical": True
+            "comments": "Entire block removed"
         })
         row_id += 1
     
@@ -335,22 +395,20 @@ def generate_professional_report(blocks_a: List[str], blocks_b: List[str]) -> Tu
             "row_id": f"R{row_id}",
             "tag": f"Block New",
             "pdf_a_content": "",
-            "pdf_b_content": f"✅ {added['block'][:130]}",
+            "pdf_b_content": f"✅ {added['text'][:150]}",
             "status": "ADDED",
-            "comments": "This block was added",
-            "is_critical": True
+            "comments": "New block added"
         })
         row_id += 1
     
-    # Summary stats
     summary = {
-        "total_blocks": len(report_rows),
+        "total_rows": len(report_rows),
         "no_change": sum(1 for r in report_rows if r['status'] == 'NO CHANGE'),
         "minor_change": sum(1 for r in report_rows if r['status'] == 'MINOR_CHANGE'),
         "modified": sum(1 for r in report_rows if r['status'] == 'MODIFIED'),
         "added": sum(1 for r in report_rows if r['status'] == 'ADDED'),
         "deleted": sum(1 for r in report_rows if r['status'] == 'DELETED'),
-        "critical_items": sum(1 for r in report_rows if r.get('is_critical', False))
+        "matched_pairs": len(matched_pairs)
     }
     
     return report_rows, summary
@@ -361,7 +419,7 @@ def generate_professional_report(blocks_a: List[str], blocks_b: List[str]) -> Tu
 
 @app.route("/")
 def home():
-    return jsonify({"status": "API running - Premium Word-Level Comparison"})
+    return jsonify({"status": "API running - Layout-Aware Comparison"})
 
 @app.route("/compare", methods=["POST"])
 def compare():
@@ -378,34 +436,34 @@ def compare():
         if not f1.filename.lower().endswith('.pdf') or not f2.filename.lower().endswith('.pdf'):
             return jsonify({"error": "Both files must be PDFs"}), 400
         
-        # Extract and process
-        text_a = extract_text(f1)
-        text_b = extract_text(f2)
+        # Extract with layout awareness
+        text_a = extract_text_with_layout(f1)
+        text_b = extract_text_with_layout(f2)
         
         if not text_a or not text_b:
             return jsonify({"error": "Could not extract text from PDFs"}), 400
         
-        blocks_a = split_into_blocks(text_a)
-        blocks_b = split_into_blocks(text_b)
+        # Create semantic blocks
+        blocks_a = create_semantic_blocks(text_a)
+        blocks_b = create_semantic_blocks(text_b)
         
         if not blocks_a or not blocks_b:
-            return jsonify({"error": "Could not create comparison blocks"}), 400
+            return jsonify({"error": "Could not create blocks"}), 400
         
-        # Generate professional report
-        report_rows, summary = generate_professional_report(blocks_a, blocks_b)
+        # Generate report
+        report_rows, summary = generate_comparison_report(blocks_a, blocks_b)
         
         return jsonify({
             "report": {
                 "document_type": "pdf_comparison",
-                "purpose": "Word-level pack copy comparison",
+                "purpose": "Layout-aware block matching with character-level diff",
                 "comparison_table": report_rows,
                 "summary": {
-                    "total_rows": summary['total_blocks'],
+                    "total_rows": summary['total_rows'],
                     "no_change": summary['no_change'],
                     "modified": summary['modified'],
                     "added": summary['added'],
-                    "deleted": summary['deleted'],
-                    "critical_items": summary['critical_items']
+                    "deleted": summary['deleted']
                 }
             }
         })
@@ -431,58 +489,50 @@ def summary():
         if not f1.filename.lower().endswith('.pdf') or not f2.filename.lower().endswith('.pdf'):
             return jsonify({"error": "Both files must be PDFs"}), 400
         
-        text_a = extract_text(f1)
-        text_b = extract_text(f2)
+        text_a = extract_text_with_layout(f1)
+        text_b = extract_text_with_layout(f2)
         
         if not text_a or not text_b:
             return jsonify({"error": "Could not extract text from PDFs"}), 400
         
-        blocks_a = split_into_blocks(text_a)
-        blocks_b = split_into_blocks(text_b)
+        blocks_a = create_semantic_blocks(text_a)
+        blocks_b = create_semantic_blocks(text_b)
         
-        report_rows, summary = generate_professional_report(blocks_a, blocks_b)
+        report_rows, summary = generate_comparison_report(blocks_a, blocks_b)
         
-        # Build structured summary for AI
-        critical_changes = [r for r in report_rows if r.get('is_critical', False)]
-        other_changes = [r for r in report_rows if not r.get('is_critical', False)]
+        # Build detailed summary
+        real_changes = [r for r in report_rows if r['status'] in ['MODIFIED', 'ADDED', 'DELETED', 'MINOR_CHANGE']]
         
         changes_text = ""
-        
-        if critical_changes:
-            changes_text += "CRITICAL CHANGES (requires immediate attention):\n"
-            for i, change in enumerate(critical_changes[:20], 1):
-                changes_text += f"{i}. {change['status']} - {change['comments']}\n"
-                changes_text += f"   PDF 1: {change['pdf_a_content'][:80]}\n"
-                changes_text += f"   PDF 2: {change['pdf_b_content'][:80]}\n\n"
-        
-        if other_changes:
-            changes_text += "\nOTHER CHANGES (review for accuracy):\n"
-            for i, change in enumerate(other_changes[:15], 1):
-                changes_text += f"{i}. {change['status']} - {change['comments']}\n"
+        for i, change in enumerate(real_changes[:50], 1):
+            changes_text += f"{i}. [{change['status']}] {change['comments']}\n"
+            changes_text += f"   PDF 1: {change['pdf_a_content'][:80]}\n"
+            changes_text += f"   PDF 2: {change['pdf_b_content'][:80]}\n\n"
         
         if not changes_text:
-            changes_text = "No changes detected between PDFs"
+            changes_text = "PDFs are identical - no changes detected"
         
-        qc_prompt = f"""Professional QC Report for packaging copy verification.
+        qc_prompt = f"""Professional QC checklist from PDF comparison (every difference shown).
 
-PDF COMPARISON ANALYSIS:
+COMPARISON RESULTS:
 {changes_text}
 
-SUMMARY STATISTICS:
-- Total items reviewed: {summary['total_blocks']}
-- Critical items: {summary['critical_items']}
-- Modifications: {summary['modified']}
-- Additions: {summary['added']}
-- Deletions: {summary['deleted']}
+SUMMARY:
+- Total items: {summary['total_rows']}
+- Identical: {summary['no_change']}
+- Minor changes: {summary['minor_change']}
+- Modified: {summary['modified']}
+- Added: {summary['added']}
+- Deleted: {summary['deleted']}
 
-Please format as a professional QC checklist with:
-1. Clear item numbering
-2. Checkbox format for verification
-3. Status tags (CRITICAL, MODIFIED, ADDED, DELETED)
-4. Action items
-5. Summary at the end
+Create a professional QC checklist with:
+1. Checkbox format [ ]
+2. Clear item numbers
+3. Before/after comparison
+4. Action required
+5. Summary section
 
-Make it easy for a QC professional to print and verify each item."""
+Make it easy for printing and manual verification."""
 
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
