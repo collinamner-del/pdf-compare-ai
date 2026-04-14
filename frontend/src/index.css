@@ -259,17 +259,17 @@ html, body {
 
 .col-v1 {
   width: 20%;
-  min-width: 150px;
+  min-width: 180px;
 }
 
 .col-v2 {
   width: 28%;
-  min-width: 200px;
+  min-width: 220px;
 }
 
 .col-action {
   width: 40%;
-  min-width: 300px;
+  min-width: 320px;
   background: #1e3a8a;
   color: #fbbf24;
   font-weight: 700;
@@ -333,12 +333,12 @@ html, body {
   border: none;
 }
 
-/* Content Display */
+/* Content Display - PRESERVE ALL TEXT */
 .element-tag {
   display: inline-block;
   background: #dbeafe;
   color: #0c4a6e;
-  padding: 5px 10px;
+  padding: 6px 12px;
   border-radius: 6px;
   font-weight: 600;
   font-size: 0.8em;
@@ -346,26 +346,38 @@ html, body {
 }
 
 .text-content {
-  line-height: 1.4;
+  line-height: 1.6;
   color: #334155;
-  word-break: break-word;
+  word-wrap: break-word;
+  white-space: normal;
   font-family: "Segoe UI", sans-serif;
-  max-height: 100px;
+  font-size: 0.9em;
+  max-height: 220px;
   overflow-y: auto;
+  padding: 10px;
+  background: #ffffff;
+  border-radius: 4px;
+  border: 1px solid #e2e8f0;
 }
 
 .text-content.highlighted {
-  font-family: "Monaco", "Menlo", monospace;
-  font-size: 0.85em;
+  font-family: "Segoe UI", sans-serif;
+  font-size: 0.9em;
   background: #f8fafc;
-  padding: 8px;
+  padding: 10px;
   border-radius: 4px;
-  border-left: 3px solid #fbbf24;
+  border-left: 4px solid #fbbf24;
+  max-height: 220px;
+  overflow-y: auto;
+  white-space: normal;
+  word-wrap: break-word;
+  line-height: 1.6;
 }
 
-/* Highlighting Styles */
+/* Highlighting Styles - PRESERVE TEXT */
 .text-content mark {
   background-color: #fbbf24;
+  color: #1e3a8a;
   padding: 2px 4px;
   border-radius: 2px;
   font-weight: bold;
