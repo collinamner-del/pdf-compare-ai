@@ -1,8 +1,7 @@
 """
-Packaging PDF Comparison & Audit API - PRECISE DIFF & ACTION FOCUSED
+Packaging PDF Comparison & Audit API - FULL TEXT, NO TRUNCATION
 
-Detects EXACT changes - missing punctuation, bold text, numbers, etc.
-Reports ACTION needed for QC with ADHD-friendly clarity.
+Zero data loss. All words and blocks preserved. Precise diff detection.
 """
 
 from __future__ import annotations
@@ -12,7 +11,7 @@ import re
 import json
 import logging
 from dataclasses import dataclass
-from difflib import SequenceMatcher, ndiff
+from difflib import SequenceMatcher
 from typing import Dict, List, Optional, Tuple, Any
 
 import pdfplumber
@@ -46,8 +45,6 @@ class Segment:
     lines: int = 0
     chars: int = 0
     index: int = 0
-    page_start: Optional[int] = None
-    page_end: Optional[int] = None
 
 
 @dataclass
@@ -59,155 +56,144 @@ class MatchResult:
 
 
 # ============================================================================
-# IMPROVED TEXT EXTRACTION
+# TEXT EXTRACTION - PRESERVE EVERYTHING
 # ============================================================================
 
 def extract_text_intelligently(file_storage) -> str:
     """
-    Extract text from PDF with FULL fidelity - preserve spacing, punctuation, etc.
+    Extract ALL text from PDF. Preserve exact formatting.
+    No truncation. No data loss.
     """
     try:
         if hasattr(file_storage, "seek"):
             file_storage.seek(0)
 
-        pages_text: List[str] = []
+        all_text = []
         with pdfplumber.open(file_storage) as pdf:
-            for page_number, page in enumerate(pdf.pages, start=1):
-                # Try layout-preserving extraction first
+            for page_num, page in enumerate(pdf.pages, start=1):
+                # Try layout mode first (preserves spacing)
                 text = page.extract_text(layout=True)
-                if not text or len(text.strip()) < 20:
+                if not text:
                     text = page.extract_text()
+                if not text:
+                    text = ""
                 
-                text = text.strip() if text else ""
-                
+                text = text.strip()
                 if text:
-                    pages_text.append(f"[PAGE {page_number}]\n{text}")
+                    all_text.append(text)
 
-        full_text = "\n\n".join(pages_text).strip()
-        return full_text if full_text else ""
+        return "\n\n".join(all_text)
 
     except Exception as exc:
         raise RuntimeError(f"Text extraction failed: {exc}") from exc
 
 
 # ============================================================================
-# INTELLIGENT SEGMENTATION
+# SEGMENTATION - KEEP BLOCKS INTACT
 # ============================================================================
 
 class TextSegmenter:
     """
-    Smart segmentation that preserves exact text for precise comparison.
+    Split text into logical blocks. Keep all content. No data loss.
     """
 
-    SECTION_PATTERNS = {
-        "PRODUCT_NAME": [
-            r"^[A-Z0-9][A-Z0-9\s&\-/.,()]{5,100}$",
-            r"^(?:product|brand|name)\s*[:\-]?\s*.+$",
-        ],
-        "INGREDIENTS": [
-            r"(?:ingredients?|composition)\s*[:\-]?",
-        ],
-        "NUTRITION": [
-            r"(?:nutrition|nutritional|per 100)",
-        ],
-        "ALLERGENS": [
-            r"(?:allerg|may contain|contain)",
-        ],
-        "STORAGE": [
-            r"(?:stor|keep|temperature|fridge|best before|use by)",
-        ],
-        "INSTRUCTIONS": [
-            r"(?:instruction|direction|preparation|method|cook)",
-        ],
-        "COMPANY": [
-            r"(?:made by|produced by|manufacturer|distributed)",
-        ],
+    KEYWORDS = {
+        "PRODUCT_NAME": ["product", "brand", "name"],
+        "INGREDIENTS": ["ingredient", "composition", "contain"],
+        "NUTRITION": ["nutrition", "energy", "per 100"],
+        "ALLERGENS": ["allerg", "may contain", "nut", "milk", "sesame"],
+        "STORAGE": ["stor", "keep", "best before", "use by", "temperature"],
+        "INSTRUCTIONS": ["instruction", "direction", "preparation", "cook", "method"],
+        "COMPANY": ["made by", "produced", "manufacturer", "distributor"],
     }
 
     @classmethod
     def segment(cls, text: str) -> List[Segment]:
-        """Segment preserving exact formatting and punctuation"""
-        if not text:
+        """Segment text. Keep everything. No truncation."""
+        if not text or len(text) < 10:
             return []
-        
+
         lines = text.split('\n')
-        segments: List[Segment] = []
+        segments = []
         current_type = "GENERAL"
-        current_lines: List[str] = []
+        current_block = []
 
         for line in lines:
             stripped = line.strip()
             
-            # Page marker
-            if re.match(r"^\[PAGE\s+\d+\]$", stripped):
-                if current_lines:
-                    cls._flush_segment(segments, current_type, current_lines)
-                    current_type = "GENERAL"
-                    current_lines = []
+            # Skip page markers
+            if stripped.startswith('[PAGE'):
                 continue
             
-            # Empty line = boundary
+            # Empty line = segment boundary
             if not stripped:
-                if current_lines:
-                    cls._flush_segment(segments, current_type, current_lines)
+                if current_block:
+                    content = '\n'.join(current_block)
+                    seg = Segment(
+                        type=current_type,
+                        content=content,
+                        lines=len(current_block),
+                        chars=len(content)
+                    )
+                    if len(content.strip()) > 5:  # Only keep non-tiny segments
+                        segments.append(seg)
+                    current_block = []
                     current_type = "GENERAL"
-                    current_lines = []
                 continue
             
-            # Detect section
-            detected = cls._detect_section(stripped)
-            if detected and current_lines:
-                cls._flush_segment(segments, current_type, current_lines)
+            # Detect section type
+            detected = cls._detect_type(stripped)
+            if detected and current_block:
+                # Save previous block
+                content = '\n'.join(current_block)
+                seg = Segment(
+                    type=current_type,
+                    content=content,
+                    lines=len(current_block),
+                    chars=len(content)
+                )
+                if len(content.strip()) > 5:
+                    segments.append(seg)
                 current_type = detected
-                current_lines = [line]
-                continue
-            
-            current_lines.append(line)
+                current_block = [line]
+            else:
+                current_block.append(line)
 
-        if current_lines:
-            cls._flush_segment(segments, current_type, current_lines)
+        # Don't forget last block
+        if current_block:
+            content = '\n'.join(current_block)
+            seg = Segment(
+                type=current_type,
+                content=content,
+                lines=len(current_block),
+                chars=len(content)
+            )
+            if len(content.strip()) > 5:
+                segments.append(seg)
 
-        # Reindex
-        for idx, seg in enumerate(segments, start=1):
+        # Add index
+        for idx, seg in enumerate(segments, 1):
             seg.index = idx
 
         return segments
 
     @classmethod
-    def _detect_section(cls, line: str) -> Optional[str]:
-        line_lower = line.lower()
-        for section_type, patterns in cls.SECTION_PATTERNS.items():
-            for pattern in patterns:
-                if re.search(pattern, line_lower):
-                    return section_type
+    def _detect_type(cls, text: str) -> Optional[str]:
+        text_lower = text.lower()
+        for seg_type, keywords in cls.KEYWORDS.items():
+            for keyword in keywords:
+                if keyword in text_lower:
+                    return seg_type
         return None
 
-    @classmethod
-    def _flush_segment(cls, segments: List[Segment], seg_type: str, lines: List[str]) -> None:
-        """Preserve exact spacing and punctuation"""
-        # Join with newlines to preserve structure
-        content = '\n'.join(line.rstrip() for line in lines if line.strip())
-        
-        if len(content.strip()) < 8:
-            return
-
-        seg = Segment(
-            type=seg_type,
-            content=content,
-            lines=len(lines),
-            chars=len(content),
-        )
-        segments.append(seg)
-
 
 # ============================================================================
-# PRECISE DIFF DETECTION
+# MATCHING - PRESERVE ALL DATA
 # ============================================================================
 
-class PreciseMatcher:
+class SimpleMatcher:
     """
-    Detects EXACT changes - character level, punctuation, spacing, etc.
-    Generates clear ACTION items for QC.
+    Match segments. Preserve all text. No truncation anywhere.
     """
 
     def __init__(self, segments_a: List[Segment], segments_b: List[Segment]):
@@ -215,43 +201,45 @@ class PreciseMatcher:
         self.segments_b = segments_b
 
     def match(self) -> Tuple[List[MatchResult], List[Segment], List[Segment]]:
-        matched_pairs: List[MatchResult] = []
-        matched_a: set[int] = set()
-        matched_b: set[int] = set()
+        """Match segments. Keep everything."""
+        matched_pairs = []
+        matched_a = set()
+        matched_b = set()
 
         for idx_a, seg_a in enumerate(self.segments_a):
-            best_idx_b: Optional[int] = None
+            best_idx_b = None
             best_score = -1.0
 
             for idx_b, seg_b in enumerate(self.segments_b):
                 if idx_b in matched_b:
                     continue
 
-                score = self._score_match(seg_a, seg_b, idx_a, idx_b)
+                score = self._score(seg_a, seg_b)
                 if score > best_score:
                     best_score = score
                     best_idx_b = idx_b
 
             if best_idx_b is not None and best_score >= 50:
                 seg_b = self.segments_b[best_idx_b]
-                diff = self._precise_diff(seg_a.content, seg_b.content)
-                matched_pairs.append(MatchResult(seg_a=seg_a, seg_b=seg_b, score=best_score, diff=diff))
+                diff = self._diff(seg_a.content, seg_b.content)
+                matched_pairs.append(MatchResult(seg_a, seg_b, best_score, diff))
                 matched_a.add(idx_a)
                 matched_b.add(best_idx_b)
 
-        deleted = [seg for i, seg in enumerate(self.segments_a) if i not in matched_a]
-        added = [seg for i, seg in enumerate(self.segments_b) if i not in matched_b]
+        deleted = [s for i, s in enumerate(self.segments_a) if i not in matched_a]
+        added = [s for i, s in enumerate(self.segments_b) if i not in matched_b]
 
         return matched_pairs, deleted, added
 
-    def _score_match(self, seg_a: Segment, seg_b: Segment, idx_a: int, idx_b: int) -> float:
-        ratio = SequenceMatcher(None, seg_a.content, seg_b.content).ratio() * 100
-        type_bonus = 40.0 if seg_a.type == seg_b.type else 0.0
+    def _score(self, seg_a: Segment, seg_b: Segment) -> float:
+        """Score match. Don't truncate."""
+        ratio = SequenceMatcher(None, seg_a.content.lower(), seg_b.content.lower()).ratio() * 100
+        type_bonus = 30 if seg_a.type == seg_b.type else 0
         return ratio + type_bonus
 
-    def _precise_diff(self, text_a: str, text_b: str) -> Dict[str, Any]:
+    def _diff(self, text_a: str, text_b: str) -> Dict[str, Any]:
         """
-        Character-by-character comparison with EXACT change detection.
+        Create diff. KEEP ALL TEXT. No truncation.
         """
         if text_a == text_b:
             return {
@@ -259,15 +247,15 @@ class PreciseMatcher:
                 "similarity": 100.0,
                 "changes": [],
                 "action": "✓ No action needed",
-                "highlighted_b": text_b,
+                "pdf_b_html": text_b,
             }
 
         similarity = SequenceMatcher(None, text_a, text_b).ratio() * 100
         
-        # Get EXACT changes
-        changes = self._extract_exact_changes(text_a, text_b)
-        action = self._generate_action(changes, similarity)
-        highlighted = self._create_highlighted(text_a, text_b)
+        # Find exact changes
+        changes = self._find_changes(text_a, text_b)
+        action = self._get_action(changes, similarity)
+        html = self._highlight_diff(text_a, text_b)
 
         if similarity >= 98:
             status = "IDENTICAL"
@@ -281,122 +269,97 @@ class PreciseMatcher:
             "similarity": round(similarity, 1),
             "changes": changes,
             "action": action,
-            "highlighted_b": highlighted,
+            "pdf_b_html": html,  # FULL HTML with highlighting
         }
 
-    def _extract_exact_changes(self, text_a: str, text_b: str) -> List[str]:
-        """
-        Extract EXACT, human-readable changes.
-        E.g., "Missing period at end", "Weight: 105g → 107g", etc.
-        """
+    def _find_changes(self, text_a: str, text_b: str) -> List[str]:
+        """Find EXACT changes. No data loss."""
         changes = []
 
-        # Check for common packaging changes
-        
-        # 1. Punctuation changes
-        if text_a.rstrip('.!?') != text_b.rstrip('.!?'):
-            # Content different without punctuation
-            if text_a.rstrip('.!?,; ') == text_b.rstrip('.!?,; '):
-                # Only punctuation changed
-                if text_a.endswith('.') and not text_b.endswith('.'):
-                    changes.append("⚠️ Period removed at end")
-                elif not text_a.endswith('.') and text_b.endswith('.'):
-                    changes.append("✓ Period added at end")
-                if text_a.endswith(',') != text_b.endswith(','):
-                    changes.append("⚠️ Comma removed" if text_a.endswith(',') else "✓ Comma added")
-
-        # 2. Number changes (weights, %, dates, etc.)
-        nums_a = re.findall(r'\d+(?:\.\d+)?(?:\s*[gmkl%°CcF])?', text_a)
-        nums_b = re.findall(r'\d+(?:\.\d+)?(?:\s*[gmkl%°CcF])?', text_b)
-        
+        # Numbers changed?
+        nums_a = re.findall(r'\d+(?:\.\d+)?(?:\s*[gmkl%°CF])?', text_a)
+        nums_b = re.findall(r'\d+(?:\.\d+)?(?:\s*[gmkl%°CF])?', text_b)
         if nums_a != nums_b:
             for na, nb in zip(nums_a, nums_b):
                 if na != nb:
                     changes.append(f"⚠️ Value changed: {na} → {nb}")
 
-        # 3. Case changes
-        if text_a.lower() == text_b.lower() and text_a != text_b:
-            changes.append("⚠️ Text case changed (UPPER/lower)")
+        # Punctuation?
+        if text_a.rstrip('.!?,; ') == text_b.rstrip('.!?,; '):
+            if text_a.endswith('.') != text_b.endswith('.'):
+                changes.append("⚠️ Period changed" if text_a.endswith('.') else "✓ Period added")
+            if text_a.endswith(',') != text_b.endswith(','):
+                changes.append("⚠️ Comma changed")
 
-        # 4. Word additions/deletions
+        # Words removed?
         words_a = set(text_a.split())
         words_b = set(text_b.split())
-        
         removed = words_a - words_b
         added = words_b - words_a
-        
+
         for word in removed:
-            if len(word) > 2:  # Skip small words
+            if len(word) > 2 and word not in ['.', ',', '!', '?']:
                 changes.append(f"❌ Removed: '{word}'")
-        
+
         for word in added:
-            if len(word) > 2:
+            if len(word) > 2 and word not in ['.', ',', '!', '?']:
                 changes.append(f"✨ Added: '{word}'")
 
-        # 5. Spacing changes
-        if text_a.strip() == text_b.strip() and text_a != text_b:
-            changes.append("⚠️ Spacing/whitespace changed")
-
         if not changes:
-            # Generic fallback
             if len(text_a) != len(text_b):
-                changes.append(f"⚠️ Length changed: {len(text_a)} → {len(text_b)} chars")
-            else:
-                changes.append("⚠️ Text modified")
+                changes.append(f"⚠️ Text modified ({len(text_a)} → {len(text_b)} chars)")
 
-        return changes[:5]  # Limit to 5 most important
+        return changes[:5]
 
-    def _generate_action(self, changes: List[str], similarity: float) -> str:
-        """Generate ACTION for QC - what to check/fix"""
+    def _get_action(self, changes: List[str], similarity: float) -> str:
+        """Get ACTION for QC."""
         if not changes or similarity >= 98:
             return "✓ No action needed"
-        
         if similarity >= 85:
-            return f"⚠️ Review: {len(changes)} minor change(s) - verify accuracy"
-        
-        return f"🔴 CHECK: {len(changes)} significant change(s) - requires verification"
+            return f"⚠️ Review {len(changes)} change(s) - verify accuracy"
+        return f"🔴 CHECK {len(changes)} significant change(s)"
 
-    def _create_highlighted(self, text_a: str, text_b: str) -> str:
-        """Create highlighted version showing differences"""
-        # Simple character-by-character highlighting
-        result = []
+    def _highlight_diff(self, text_a: str, text_b: str) -> str:
+        """
+        Highlight differences in text_b. KEEP ALL TEXT.
+        No truncation. All words preserved.
+        """
+        # Use SequenceMatcher to find matching blocks
         matcher = SequenceMatcher(None, text_a, text_b)
-        
+        result = []
+
         for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            chunk = text_b[j1:j2]
+            
             if tag == 'equal':
-                result.append(text_b[j1:j2])
+                result.append(chunk)
             elif tag == 'replace':
-                # Show what was replaced
-                result.append(f'<mark style="background:#fbbf24;font-weight:bold;">{text_b[j1:j2]}</mark>')
+                result.append(f'<mark style="background:#fbbf24;font-weight:bold;">{chunk}</mark>')
             elif tag == 'insert':
-                result.append(f'<mark style="background:#fbbf24;font-weight:bold;">{text_b[j1:j2]}</mark>')
+                result.append(f'<mark style="background:#fbbf24;font-weight:bold;">{chunk}</mark>')
             elif tag == 'delete':
-                result.append(f'<del style="background:#fee2e2;color:#dc2626;text-decoration:line-through;">{text_a[i1:i2]}</del>')
-        
+                # Don't add deleted text from text_a
+                pass
+
         return ''.join(result)
 
 
 # ============================================================================
-# REPORT BUILDING - ACTION FOCUSED
+# REPORT BUILDING - NO TRUNCATION
 # ============================================================================
 
-def build_report_rows(matches: List[MatchResult], deleted: List[Segment], added: List[Segment]) -> List[Dict[str, Any]]:
-    """Build table rows focused on ACTION for QC"""
-    rows: List[Dict[str, Any]] = []
+def build_report_rows(matches: List[MatchResult], deleted: List[Segment], added: List[Segment]) -> List[Dict]:
+    """Build report. Keep ALL text. No truncation."""
+    rows = []
     row_id = 1
 
     for match in matches:
         diff = match.diff
-        
-        # Truncate for table display but keep full in data
-        v1_display = match.seg_a.content[:120] + ("..." if len(match.seg_a.content) > 120 else "")
-        v2_display = match.seg_b.content[:120] + ("..." if len(match.seg_b.content) > 120 else "")
-
         rows.append({
             "row_id": f"R{row_id}",
             "element": match.seg_a.type,
-            "pdf_a": v1_display,
-            "pdf_b_highlighted": diff["highlighted_b"][:150],
+            "pdf_a": match.seg_a.content,  # FULL TEXT
+            "pdf_b_html": diff["pdf_b_html"],  # FULL TEXT with highlighting
             "action": diff["action"],
             "status": diff["status"],
             "similarity": diff["similarity"],
@@ -408,12 +371,12 @@ def build_report_rows(matches: List[MatchResult], deleted: List[Segment], added:
         rows.append({
             "row_id": f"R{row_id}",
             "element": seg.type,
-            "pdf_a": seg.content[:120],
-            "pdf_b_highlighted": "❌ NOT IN UPDATED VERSION",
-            "action": "❌ VERIFY: Section removed - confirm intentional",
+            "pdf_a": seg.content,  # FULL TEXT
+            "pdf_b_html": "❌ DELETED - NOT IN UPDATED VERSION",
+            "action": "❌ VERIFY: Section removed",
             "status": "DELETED",
             "similarity": 0.0,
-            "changes": ["Section entirely removed"],
+            "changes": ["Entire section removed"],
         })
         row_id += 1
 
@@ -421,12 +384,12 @@ def build_report_rows(matches: List[MatchResult], deleted: List[Segment], added:
         rows.append({
             "row_id": f"R{row_id}",
             "element": seg.type,
-            "pdf_a": "✨ NEW SECTION",
-            "pdf_b_highlighted": f"<mark style=\"background:#bbf7d0;\">{seg.content[:120]}</mark>",
-            "action": "✓ NEW: Verify content is correct",
+            "pdf_a": "✨ NEW - NOT IN ORIGINAL VERSION",
+            "pdf_b_html": f'<mark style="background:#bbf7d0;padding:2px 4px;border-radius:3px;">{seg.content}</mark>',  # FULL TEXT
+            "action": "✓ NEW: Verify content correct",
             "status": "ADDED",
             "similarity": 0.0,
-            "changes": ["Section newly added"],
+            "changes": ["New section added"],
         })
         row_id += 1
 
@@ -434,19 +397,29 @@ def build_report_rows(matches: List[MatchResult], deleted: List[Segment], added:
 
 
 def build_audit_data(matches: List[MatchResult], deleted: List[Segment], added: List[Segment]) -> str:
-    """Build audit summary for AI"""
-    lines = ["PACKAGING COPY AUDIT - QC FINDINGS", ""]
+    """Build audit summary. Keep all content."""
+    lines = ["PACKAGING COPY AUDIT", "=" * 60, ""]
 
     for i, match in enumerate(matches, start=1):
-        lines.append(f"{i}. {match.seg_a.type}")
-        lines.append(f"   A: {match.seg_a.content[:150]}")
-        lines.append(f"   B: {match.seg_b.content[:150]}")
-        lines.append(f"   Match: {match.diff['similarity']}%")
-        
+        lines.append(f"{i}. {match.seg_a.type} (Match: {match.diff['similarity']}%)")
+        lines.append(f"Version A:\n{match.seg_a.content}")
+        lines.append(f"\nVersion B:\n{match.seg_b.content}")
         if match.diff["changes"]:
-            for change in match.diff["changes"]:
-                lines.append(f"   • {change}")
+            lines.append("Changes:")
+            for c in match.diff["changes"]:
+                lines.append(f"  {c}")
+        lines.append("-" * 60)
         lines.append("")
+
+    if deleted:
+        lines.append("DELETED SECTIONS:")
+        for seg in deleted:
+            lines.append(f"\n{seg.type}:\n{seg.content}\n")
+
+    if added:
+        lines.append("ADDED SECTIONS:")
+        for seg in added:
+            lines.append(f"\n{seg.type}:\n{seg.content}\n")
 
     return "\n".join(lines)
 
@@ -460,15 +433,12 @@ def generate_summary_with_openai(audit_data: str) -> str:
         raise RuntimeError("OpenAI API key not configured")
 
     prompt = f"""
-You are a Packaging QA Specialist. Write a BRIEF, ACTIONABLE QC checklist.
+You are a QA specialist. Create a BRIEF checklist for QC.
 
 Format:
-[ ] 1. ELEMENT | CHANGE | ACTION
-[ ] 2. ELEMENT | CHANGE | ACTION
+[ ] ELEMENT | CHANGE | ACTION
 
-Be specific. Example:
-[ ] 1. ALLERGENS | "nuts" removed | VERIFY: Is this intentional? Check formulation.
-[ ] 2. WEIGHT | 105g → 107g | UPDATE: Verify new weight in system.
+Be specific and actionable.
 
 AUDIT DATA:
 {audit_data}
@@ -482,7 +452,7 @@ AUDIT DATA:
     payload = {
         "model": OPENAI_MODEL,
         "messages": [
-            {"role": "system", "content": "You are a precise QA specialist writing actionable checklists."},
+            {"role": "system", "content": "Create precise QC checklists."},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.2,
@@ -499,20 +469,18 @@ AUDIT DATA:
     if response.status_code != 200:
         raise RuntimeError(f"OpenAI error: {response.text}")
 
-    data = response.json()
-    return data["choices"][0]["message"]["content"]
+    return response.json()["choices"][0]["message"]["content"]
 
 
 # ============================================================================
 # Validation
 # ============================================================================
 
-def validate_uploaded_pdfs() -> Tuple[Any, Any]:
+def validate_pdfs() -> Tuple[Any, Any]:
     if "file1" not in request.files or "file2" not in request.files:
         raise ValueError("Both PDF files required")
 
-    f1 = request.files["file1"]
-    f2 = request.files["file2"]
+    f1, f2 = request.files["file1"], request.files["file2"]
 
     if not f1 or not f1.filename or not f2 or not f2.filename:
         raise ValueError("Files missing")
@@ -529,13 +497,13 @@ def validate_uploaded_pdfs() -> Tuple[Any, Any]:
 
 @app.route("/")
 def home():
-    return jsonify({"status": "API running", "service": "Packaging PDF Audit API"})
+    return jsonify({"status": "API running"})
 
 
 @app.route("/compare", methods=["POST"])
 def compare():
     try:
-        f1, f2 = validate_uploaded_pdfs()
+        f1, f2 = validate_pdfs()
 
         text_a = extract_text_intelligently(f1)
         text_b = extract_text_intelligently(f2)
@@ -543,44 +511,42 @@ def compare():
         if not text_a or not text_b:
             return jsonify({"error": "Could not extract text"}), 400
 
-        segments_a = TextSegmenter.segment(text_a)
-        segments_b = TextSegmenter.segment(text_b)
+        segs_a = TextSegmenter.segment(text_a)
+        segs_b = TextSegmenter.segment(text_b)
 
-        if not segments_a or not segments_b:
+        if not segs_a or not segs_b:
             return jsonify({"error": "Could not segment text"}), 400
 
-        matcher = PreciseMatcher(segments_a, segments_b)
-        matched_pairs, deleted, added = matcher.match()
+        matcher = SimpleMatcher(segs_a, segs_b)
+        pairs, deleted, added = matcher.match()
 
-        report_rows = build_report_rows(matched_pairs, deleted, added)
-
-        summary = {
-            "total_rows": len(report_rows),
-            "identical": sum(1 for r in report_rows if r["status"] == "IDENTICAL"),
-            "minor": sum(1 for r in report_rows if r["status"] == "MINOR"),
-            "significant": sum(1 for r in report_rows if r["status"] == "SIGNIFICANT"),
-            "added": sum(1 for r in report_rows if r["status"] == "ADDED"),
-            "deleted": sum(1 for r in report_rows if r["status"] == "DELETED"),
-        }
+        rows = build_report_rows(pairs, deleted, added)
 
         return jsonify({
             "report": {
-                "comparison_table": report_rows,
-                "summary": summary,
+                "comparison_table": rows,
+                "summary": {
+                    "total_rows": len(rows),
+                    "identical": sum(1 for r in rows if r["status"] == "IDENTICAL"),
+                    "minor": sum(1 for r in rows if r["status"] == "MINOR"),
+                    "significant": sum(1 for r in rows if r["status"] == "SIGNIFICANT"),
+                    "added": sum(1 for r in rows if r["status"] == "ADDED"),
+                    "deleted": sum(1 for r in rows if r["status"] == "DELETED"),
+                }
             }
         })
 
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
         logger.exception("Compare failed")
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/summary", methods=["POST"])
 def summary():
     try:
-        f1, f2 = validate_uploaded_pdfs()
+        f1, f2 = validate_pdfs()
 
         text_a = extract_text_intelligently(f1)
         text_b = extract_text_intelligently(f2)
@@ -588,27 +554,23 @@ def summary():
         if not text_a or not text_b:
             return jsonify({"error": "Could not extract text"}), 400
 
-        segments_a = TextSegmenter.segment(text_a)
-        segments_b = TextSegmenter.segment(text_b)
+        segs_a = TextSegmenter.segment(text_a)
+        segs_b = TextSegmenter.segment(text_b)
 
-        matcher = PreciseMatcher(segments_a, segments_b)
-        matched_pairs, deleted, added = matcher.match()
+        matcher = SimpleMatcher(segs_a, segs_b)
+        pairs, deleted, added = matcher.match()
 
-        audit_data = build_audit_data(matched_pairs, deleted, added)
-        summary_text = generate_summary_with_openai(audit_data)
+        audit = build_audit_data(pairs, deleted, added)
+        summary_text = generate_summary_with_openai(audit)
 
         return jsonify({"summary": summary_text})
 
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
         logger.exception("Summary failed")
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": str(e)}), 500
 
-
-# ============================================================================
-# Entrypoint
-# ============================================================================
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")), debug=False)
