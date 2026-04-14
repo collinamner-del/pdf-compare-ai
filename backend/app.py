@@ -1,8 +1,8 @@
 """
-Packaging PDF Comparison & Audit API
+Packaging PDF Comparison & Audit API - Enhanced with Difference Highlighting
 
 Compares two packaging PDFs, extracts text intelligently, segments it into logical blocks,
-matches corresponding sections, and produces a structured audit report.
+matches corresponding sections, and produces a structured audit report with clear diff highlighting.
 """
 
 from __future__ import annotations
@@ -261,7 +261,7 @@ class TextSegmenter:
 
 class SegmentMatcher:
     """
-    Greedy matcher for segment pairs.
+    Greedy matcher for segment pairs with enhanced diff highlighting.
     """
 
     def __init__(self, segments_a: List[Segment], segments_b: List[Segment]):
@@ -317,10 +317,14 @@ class SegmentMatcher:
                 "status": "IDENTICAL",
                 "similarity": 100.0,
                 "changes": [],
+                "highlighted_b": text_b,
+                "full_text_a": text_a,
+                "full_text_b": text_b,
             }
 
         similarity = SequenceMatcher(None, text_a, text_b).ratio() * 100
         changes = self._token_diff(text_a, text_b)
+        highlighted_b = self._create_highlighted_diff(text_a, text_b)
 
         if similarity >= 98:
             status = "IDENTICAL"
@@ -333,6 +337,9 @@ class SegmentMatcher:
             "status": status,
             "similarity": round(similarity, 1),
             "changes": changes,
+            "highlighted_b": highlighted_b,
+            "full_text_a": text_a,
+            "full_text_b": text_b,
         }
 
     def _token_diff(self, text_a: str, text_b: str) -> List[Dict[str, str]]:
@@ -375,6 +382,31 @@ class SegmentMatcher:
         flush()
         return changes[:12]
 
+    def _create_highlighted_diff(self, text_a: str, text_b: str) -> str:
+        """
+        Create a highlighted version of text_b showing what changed.
+        Uses HTML tags: <mark> for additions, <del> for deletions.
+        """
+        tokens_a = text_a.split()
+        tokens_b = text_b.split()
+        
+        result: List[str] = []
+        
+        for token in ndiff(tokens_a, tokens_b):
+            marker = token[:2]
+            value = token[2:]
+            
+            if marker == "  ":
+                result.append(value)
+            elif marker == "- ":
+                # Token was removed - show as deleted
+                result.append(f'<del style="background-color:#ffcccc;text-decoration:line-through;">{value}</del>')
+            elif marker == "+ ":
+                # Token was added - highlight in yellow
+                result.append(f'<mark style="background-color:#ffff99;font-weight:bold;">{value}</mark>')
+        
+        return " ".join(result)
+
 
 # -----------------------------------------------------------------------------
 # Report building
@@ -388,11 +420,13 @@ def build_report_rows(matches: List[MatchResult], deleted: List[Segment], added:
         diff = match.diff
         rows.append({
             "row_id": f"R{row_id}",
-            "tag": match.seg_a.type,
-            "pdf_a_content": match.seg_a.content[:200],
-            "pdf_b_content": match.seg_b.content[:200],
+            "element": match.seg_a.type,
+            "pdf_a_content": match.seg_a.content[:250],
+            "pdf_b_content": match.seg_b.content[:250],
+            "pdf_b_highlighted": diff.get("highlighted_b", match.seg_b.content[:250]),
             "status": diff["status"],
-            "comments": f"{diff['similarity']:.0f}% match | {len(diff['changes'])} change groups",
+            "similarity": diff["similarity"],
+            "impact": "No changes" if diff["status"] == "IDENTICAL" else f"{len(diff['changes'])} change(s)",
             "changes": diff["changes"],
             "score": round(match.score, 1),
         })
@@ -401,22 +435,26 @@ def build_report_rows(matches: List[MatchResult], deleted: List[Segment], added:
     for seg in deleted:
         rows.append({
             "row_id": f"R{row_id}",
-            "tag": seg.type,
-            "pdf_a_content": seg.content[:200],
-            "pdf_b_content": "❌ [DELETED]",
+            "element": seg.type,
+            "pdf_a_content": seg.content[:250],
+            "pdf_b_content": "❌ DELETED",
+            "pdf_b_highlighted": "❌ DELETED",
             "status": "DELETED",
-            "comments": "Content removed",
+            "similarity": 0.0,
+            "impact": "Content removed",
         })
         row_id += 1
 
     for seg in added:
         rows.append({
             "row_id": f"R{row_id}",
-            "tag": seg.type,
+            "element": seg.type,
             "pdf_a_content": "",
-            "pdf_b_content": f"✅ {seg.content[:200]}",
+            "pdf_b_content": seg.content[:250],
+            "pdf_b_highlighted": f"<mark>{seg.content[:250]}</mark>",
             "status": "ADDED",
-            "comments": "New content",
+            "similarity": 0.0,
+            "impact": "Content added",
         })
         row_id += 1
 
@@ -470,16 +508,16 @@ You are a Senior Creative Director and Packaging QA Specialist.
 Write a professional QC report based on the audit data below.
 
 Include:
-1. Executive Summary
+1. Executive Summary (2-3 sentences)
 2. Spot the Difference table
    - Copy Element
-   - Version A
-   - Version B
+   - Version A (Original)
+   - Version B (Updated)
    - Impact
 3. Critical Findings / Red Flags
 4. Action Items checklist
 
-Keep it concise, scannable, and suitable for print.
+Keep it concise, scannable, professional, and suitable for print.
 
 AUDIT DATA:
 {audit_data}
@@ -514,9 +552,14 @@ AUDIT DATA:
     return data["choices"][0]["message"]["content"]
 
 
-# -----------------------------------------------------------------------------
+# -------
+
+-----
+
 # Validation helpers
-# -----------------------------------------------------------------------------
+# -------
+
+-----
 
 def validate_uploaded_pdfs() -> Tuple[Any, Any]:
     if "file1" not in request.files or "file2" not in request.files:
@@ -534,9 +577,14 @@ def validate_uploaded_pdfs() -> Tuple[Any, Any]:
     return f1, f2
 
 
-# -----------------------------------------------------------------------------
+# -------
+
+-----
+
 # Routes
-# -----------------------------------------------------------------------------
+# -------
+
+-----
 
 @app.route("/")
 def home():
@@ -621,9 +669,14 @@ def summary():
         return jsonify({"error": str(exc)}), 500
 
 
-# -----------------------------------------------------------------------------
+# -------
+
+-----
+
 # Entrypoint
-# -----------------------------------------------------------------------------
+# -------
+
+-----
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")), debug=False)
