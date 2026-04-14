@@ -75,8 +75,8 @@ export default function App() {
   return (
     <div className="app-container">
       <header className="header">
-        <h1>📦 Packaging PDF Audit Tool</h1>
-        <p>Professional side-by-side comparison with difference highlighting</p>
+        <h1>📦 Packaging QC Audit Tool</h1>
+        <p>Precise change detection with ACTION-focused reporting</p>
       </header>
 
       <section className="upload-section">
@@ -112,14 +112,14 @@ export default function App() {
             onClick={handleCompare}
             disabled={!file1 || !file2 || loading}
           >
-            {loading ? "⏳ Comparing..." : "🔍 Compare Documents"}
+            {loading ? "⏳ Analyzing..." : "🔍 Compare & Detect Changes"}
           </button>
           <button
             className="btn btn-summary"
             onClick={handleGenerateSummary}
             disabled={!file1 || !file2 || loading}
           >
-            {loading ? "⏳ Generating..." : "📋 Generate QC Report"}
+            {loading ? "⏳ Generating..." : "✅ QC Checklist"}
           </button>
         </div>
       </section>
@@ -133,26 +133,30 @@ export default function App() {
       {report && (
         <section className="report-section">
           <div className="report-header">
-            <h2>📊 Comparison Results</h2>
+            <h2>📋 Change Detection Report</h2>
             <div className="summary-stats">
               <div className="stat">
-                <span className="stat-label">Total Items</span>
+                <span className="stat-label">Total</span>
                 <span className="stat-value">{report.summary.total_rows}</span>
               </div>
               <div className="stat">
-                <span className="stat-label">Identical</span>
+                <span className="stat-label">✓ No Change</span>
                 <span className="stat-value stat-identical">{report.summary.identical}</span>
               </div>
               <div className="stat">
-                <span className="stat-label">Modified</span>
-                <span className="stat-value stat-modified">{report.summary.modified}</span>
+                <span className="stat-label">⚠️ Minor</span>
+                <span className="stat-value stat-modified">{report.summary.minor}</span>
               </div>
               <div className="stat">
-                <span className="stat-label">Added</span>
+                <span className="stat-label">🔴 Significant</span>
+                <span className="stat-value stat-significant">{report.summary.significant}</span>
+              </div>
+              <div className="stat">
+                <span className="stat-label">✨ Added</span>
                 <span className="stat-value stat-added">{report.summary.added}</span>
               </div>
               <div className="stat">
-                <span className="stat-label">Deleted</span>
+                <span className="stat-label">❌ Deleted</span>
                 <span className="stat-value stat-deleted">{report.summary.deleted}</span>
               </div>
             </div>
@@ -163,9 +167,9 @@ export default function App() {
               <thead>
                 <tr>
                   <th className="col-element">Element</th>
-                  <th className="col-v1">Version A (Original)</th>
-                  <th className="col-v2">Version B (Updated) ← Changes Highlighted</th>
-                  <th className="col-impact">Status & Impact</th>
+                  <th className="col-v1">Original (V1)</th>
+                  <th className="col-v2">Updated (V2) ← Changes Highlighted</th>
+                  <th className="col-action">ACTION FOR QC</th>
                 </tr>
               </thead>
               <tbody>
@@ -175,20 +179,26 @@ export default function App() {
                       <span className="element-tag">{row.element}</span>
                     </td>
                     <td className="col-v1">
-                      <div className="content-text">{row.pdf_a_content}</div>
+                      <div className="text-content">{row.pdf_a}</div>
                     </td>
                     <td className="col-v2">
                       <div
-                        className="content-text highlighted"
-                        dangerouslySetInnerHTML={{
-                          __html: row.pdf_b_highlighted,
-                        }}
+                        className="text-content highlighted"
+                        dangerouslySetInnerHTML={{ __html: row.pdf_b_highlighted }}
                       />
                     </td>
-                    <td className="col-impact">
-                      <div className="impact-container">
-                        <StatusBadge status={row.status} similarity={row.similarity} />
-                        <div className="impact-text">{row.impact}</div>
+                    <td className="col-action">
+                      <div className="action-box">
+                        <div className="action-text">{row.action}</div>
+                        {row.changes && row.changes.length > 0 && (
+                          <div className="changes-list">
+                            {row.changes.map((change, idx) => (
+                              <div key={idx} className="change-item">
+                                {change}
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -201,42 +211,12 @@ export default function App() {
 
       {summary && (
         <section className="summary-section">
-          <h2>📋 AI QC Report</h2>
+          <h2>✅ QC Verification Checklist</h2>
           <div className="summary-content">
             <pre>{summary}</pre>
           </div>
         </section>
       )}
     </div>
-  );
-}
-
-function StatusBadge({ status, similarity }) {
-  let className = "status-badge";
-  let text = status;
-  let icon = "";
-
-  if (status === "IDENTICAL") {
-    className += " badge-identical";
-    icon = "✓";
-  } else if (status === "MINOR_CHANGE") {
-    className += " badge-minor";
-    icon = "⚠️";
-  } else if (status === "SIGNIFICANT_CHANGE") {
-    className += " badge-significant";
-    icon = "🔴";
-  } else if (status === "ADDED") {
-    className += " badge-added";
-    icon = "✨";
-  } else if (status === "DELETED") {
-    className += " badge-deleted";
-    icon = "❌";
-  }
-
-  return (
-    <span className={className}>
-      {icon} {text}
-      {similarity !== undefined && similarity !== null && <span> {similarity}%</span>}
-    </span>
   );
 }
