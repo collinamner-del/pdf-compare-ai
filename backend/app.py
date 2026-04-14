@@ -1,8 +1,8 @@
 """
-Packaging PDF Comparison & Audit API - Production Version
+Packaging PDF Comparison & Audit API
 
 Compares two packaging PDFs, extracts text intelligently, segments it into logical blocks,
-matches corresponding sections, and produces a structured audit report with difference highlighting.
+matches corresponding sections, and produces a structured audit report.
 """
 
 from __future__ import annotations
@@ -20,9 +20,9 @@ import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-# ============================================================================
+# -----------------------------------------------------------------------------
 # App setup
-# ============================================================================
+# -----------------------------------------------------------------------------
 
 app = Flask(__name__)
 CORS(app)
@@ -35,9 +35,9 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_TIMEOUT = int(os.getenv("OPENAI_TIMEOUT", "45"))
 
 
-# ============================================================================
+# -----------------------------------------------------------------------------
 # Data structures
-# ============================================================================
+# -----------------------------------------------------------------------------
 
 @dataclass
 class Segment:
@@ -58,9 +58,9 @@ class MatchResult:
     diff: Dict[str, Any]
 
 
-# ============================================================================
+# -----------------------------------------------------------------------------
 # Text extraction
-# ============================================================================
+# -----------------------------------------------------------------------------
 
 def extract_text_intelligently(file_storage) -> str:
     """
@@ -84,9 +84,9 @@ def extract_text_intelligently(file_storage) -> str:
         raise RuntimeError(f"Text extraction failed: {exc}") from exc
 
 
-# ============================================================================
+# -----------------------------------------------------------------------------
 # Segmentation
-# ============================================================================
+# -----------------------------------------------------------------------------
 
 class TextSegmenter:
     """
@@ -255,13 +255,13 @@ class TextSegmenter:
         return re.sub(r"\s+", " ", text).strip()
 
 
-# ============================================================================
+# -----------------------------------------------------------------------------
 # Matching and diffing
-# ============================================================================
+# -----------------------------------------------------------------------------
 
 class SegmentMatcher:
     """
-    Greedy matcher for segment pairs with enhanced diff highlighting.
+    Greedy matcher for segment pairs.
     """
 
     def __init__(self, segments_a: List[Segment], segments_b: List[Segment]):
@@ -302,11 +302,13 @@ class SegmentMatcher:
         text_sim = SequenceMatcher(None, seg_a.content.lower(), seg_b.content.lower()).ratio() * 100
         type_bonus = 100.0 if seg_a.type == seg_b.type else 0.0
 
+        # Prefer similar positions when the documents have roughly the same layout.
         if max(len(self.segments_a), len(self.segments_b)) > 1:
             order_bonus = 100.0 * (1.0 - abs(idx_a - idx_b) / max(len(self.segments_a), len(self.segments_b)))
         else:
             order_bonus = 100.0
 
+        # Weighting is normalized to 0-100.
         return (0.72 * text_sim) + (0.18 * type_bonus) + (0.10 * order_bonus)
 
     def _detailed_diff(self, text_a: str, text_b: str) -> Dict[str, Any]:
@@ -315,14 +317,10 @@ class SegmentMatcher:
                 "status": "IDENTICAL",
                 "similarity": 100.0,
                 "changes": [],
-                "highlighted_b": text_b,
-                "full_text_a": text_a,
-                "full_text_b": text_b,
             }
 
         similarity = SequenceMatcher(None, text_a, text_b).ratio() * 100
         changes = self._token_diff(text_a, text_b)
-        highlighted_b = self._create_highlighted_diff(text_a, text_b)
 
         if similarity >= 98:
             status = "IDENTICAL"
@@ -335,13 +333,12 @@ class SegmentMatcher:
             "status": status,
             "similarity": round(similarity, 1),
             "changes": changes,
-            "highlighted_b": highlighted_b,
-            "full_text_a": text_a,
-            "full_text_b": text_b,
         }
 
     def _token_diff(self, text_a: str, text_b: str) -> List[Dict[str, str]]:
-        """Compact token diff so the report is readable."""
+        """
+        Compact token diff so the report is readable.
+        """
         tokens_a = text_a.split()
         tokens_b = text_b.split()
 
@@ -378,30 +375,10 @@ class SegmentMatcher:
         flush()
         return changes[:12]
 
-    def _create_highlighted_diff(self, text_a: str, text_b: str) -> str:
-        """Create a highlighted version of text_b showing what changed."""
-        tokens_a = text_a.split()
-        tokens_b = text_b.split()
-        
-        result: List[str] = []
-        
-        for token in ndiff(tokens_a, tokens_b):
-            marker = token[:2]
-            value = token[2:]
-            
-            if marker == "  ":
-                result.append(value)
-            elif marker == "- ":
-                result.append(f'<del style="background-color:#ffcccc;text-decoration:line-through;">{value}</del>')
-            elif marker == "+ ":
-                result.append(f'<mark style="background-color:#ffff99;font-weight:bold;">{value}</mark>')
-        
-        return " ".join(result)
 
-
-# ============================================================================
+# -----------------------------------------------------------------------------
 # Report building
-# ============================================================================
+# -----------------------------------------------------------------------------
 
 def build_report_rows(matches: List[MatchResult], deleted: List[Segment], added: List[Segment]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
@@ -412,16 +389,12 @@ def build_report_rows(matches: List[MatchResult], deleted: List[Segment], added:
         rows.append({
             "row_id": f"R{row_id}",
             "tag": match.seg_a.type,
-            "pdf_a_content": match.seg_a.content[:250],
-            "pdf_b_content": match.seg_b.content[:250],
-            "pdf_b_highlighted": diff.get("highlighted_b", match.seg_b.content[:250]),
+            "pdf_a_content": match.seg_a.content[:200],
+            "pdf_b_content": match.seg_b.content[:200],
             "status": diff["status"],
-            "similarity": diff["similarity"],
-            "comments": f"{diff['similarity']:.0f}% match | {len(diff['changes'])} change(s)",
+            "comments": f"{diff['similarity']:.0f}% match | {len(diff['changes'])} change groups",
             "changes": diff["changes"],
             "score": round(match.score, 1),
-            "full_text_a": diff.get("full_text_a", ""),
-            "full_text_b": diff.get("full_text_b", ""),
         })
         row_id += 1
 
@@ -429,14 +402,10 @@ def build_report_rows(matches: List[MatchResult], deleted: List[Segment], added:
         rows.append({
             "row_id": f"R{row_id}",
             "tag": seg.type,
-            "pdf_a_content": seg.content[:250],
+            "pdf_a_content": seg.content[:200],
             "pdf_b_content": "❌ [DELETED]",
-            "pdf_b_highlighted": "❌ [DELETED]",
             "status": "DELETED",
-            "similarity": 0.0,
             "comments": "Content removed",
-            "full_text_a": seg.content,
-            "full_text_b": "",
         })
         row_id += 1
 
@@ -445,13 +414,9 @@ def build_report_rows(matches: List[MatchResult], deleted: List[Segment], added:
             "row_id": f"R{row_id}",
             "tag": seg.type,
             "pdf_a_content": "",
-            "pdf_b_content": f"✅ {seg.content[:250]}",
-            "pdf_b_highlighted": f"<mark style=\"background-color:#ccffcc;font-weight:bold;\">{seg.content[:250]}</mark>",
+            "pdf_b_content": f"✅ {seg.content[:200]}",
             "status": "ADDED",
-            "similarity": 0.0,
             "comments": "New content",
-            "full_text_a": "",
-            "full_text_b": seg.content,
         })
         row_id += 1
 
@@ -491,9 +456,9 @@ def build_audit_data(matches: List[MatchResult], deleted: List[Segment], added: 
     return "\n".join(lines)
 
 
-# ============================================================================
+# -----------------------------------------------------------------------------
 # OpenAI summary
-# ============================================================================
+# -----------------------------------------------------------------------------
 
 def generate_summary_with_openai(audit_data: str) -> str:
     if not OPENAI_API_KEY:
@@ -505,16 +470,16 @@ You are a Senior Creative Director and Packaging QA Specialist.
 Write a professional QC report based on the audit data below.
 
 Include:
-1. Executive Summary (2-3 sentences)
+1. Executive Summary
 2. Spot the Difference table
    - Copy Element
-   - Version A (Original)
-   - Version B (Updated)
+   - Version A
+   - Version B
    - Impact
 3. Critical Findings / Red Flags
 4. Action Items checklist
 
-Keep it concise, scannable, professional, and suitable for print.
+Keep it concise, scannable, and suitable for print.
 
 AUDIT DATA:
 {audit_data}
@@ -549,9 +514,9 @@ AUDIT DATA:
     return data["choices"][0]["message"]["content"]
 
 
-# ============================================================================
+# -----------------------------------------------------------------------------
 # Validation helpers
-# ============================================================================
+# -----------------------------------------------------------------------------
 
 def validate_uploaded_pdfs() -> Tuple[Any, Any]:
     if "file1" not in request.files or "file2" not in request.files:
@@ -569,9 +534,9 @@ def validate_uploaded_pdfs() -> Tuple[Any, Any]:
     return f1, f2
 
 
-# ============================================================================
+# -----------------------------------------------------------------------------
 # Routes
-# ============================================================================
+# -----------------------------------------------------------------------------
 
 @app.route("/")
 def home():
@@ -656,9 +621,9 @@ def summary():
         return jsonify({"error": str(exc)}), 500
 
 
-# ============================================================================
+# -----------------------------------------------------------------------------
 # Entrypoint
-# ============================================================================
+# -----------------------------------------------------------------------------
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")), debug=False)
