@@ -290,7 +290,7 @@ class IntelligentSegmenter:
                 # If blocks have same type and small next block, might be spillover
                 if (block.block_type == next_block.block_type and 
                     len(next_block.text) < 100 and
-                    len(next_block.source_lines) <= 2):
+                    next_block.source_lines <= 2):
                     
                     # Merge them
                     merged_text = block.text + " " + next_block.text
