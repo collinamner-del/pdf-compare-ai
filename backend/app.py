@@ -253,53 +253,55 @@ def highlight_diff(text_a: str, text_b: str) -> str:
 
 def reconcile_misaligned_content(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    If deleted content appears in added blocks, move it back.
-    Auto-fixes OCR extraction misalignment without QC intervention.
+    Global reconciliation: If deleted content appears as added ANYWHERE in report,
+    it's an extraction issue - merge them back together.
     """
-    deleted_rows = [r for r in rows if r["status"] == "DELETED"]
-    added_rows = [r for r in rows if r["status"] == "ADDED"]
-    changed_rows = [r for r in rows if r["status"] == "CHANGED"]
+    deleted_rows = [i for i, r in enumerate(rows) if r["status"] == "DELETED"]
+    added_rows = [i for i, r in enumerate(rows) if r["status"] == "ADDED"]
     
-    # Track reconciliations
-    reconciled_indices = set()
+    reconciled = set()
     
-    for del_row in deleted_rows:
-        deleted_text = del_row["pdf_a"].lower()
-        deleted_words = set(w for w in deleted_text.split() if len(w) > 2)
+    # For each deleted row, check ALL added rows
+    for del_idx in deleted_rows:
+        if del_idx in reconciled:
+            continue
+            
+        deleted_content = rows[del_idx]["pdf_a"].lower().strip()
+        deleted_words = set(w for w in deleted_content.split() if len(w) > 2)
         
         if not deleted_words:
             continue
         
-        for add_idx, add_row in enumerate(added_rows):
-            if add_idx in reconciled_indices:
+        for add_idx in added_rows:
+            if add_idx in reconciled:
                 continue
-                
-            added_text = add_row["pdf_b"].lower() if add_row["pdf_b"] else ""
-            added_words = set(w for w in added_text.split() if len(w) > 2)
+            
+            added_content = rows[add_idx]["pdf_b"].lower().strip() if rows[add_idx]["pdf_b"] else ""
+            added_words = set(w for w in added_content.split() if len(w) > 2)
             
             # Calculate overlap
+            if not added_words:
+                continue
+                
             overlap = len(deleted_words & added_words)
-            overlap_ratio = overlap / len(deleted_words) if deleted_words else 0
+            overlap_ratio = overlap / max(len(deleted_words), len(added_words))
             
-            # If significant overlap (>60%), reconcile them
-            if overlap_ratio > 0.6:
-                # Move content back to deleted block
-                del_row["pdf_b"] = del_row["pdf_a"]  # Restore the content
-                del_row["pdf_b_html"] = del_row["pdf_a"]
-                del_row["status"] = "RECONCILED"
-                del_row["action"] = "✓ AUTO-FIXED: OCR misalignment corrected"
-                del_row["changes"] = []
-                del_row["similarity"] = 100.0
+            # HIGH overlap (>70%) = same block, just moved/split
+            if overlap_ratio > 0.70:
+                # Mark both as reconciled (they're the same thing)
+                rows[del_idx]["status"] = "RECONCILED"
+                rows[del_idx]["action"] = "✓ Content reconciled (same in both versions)"
+                rows[del_idx]["changes"] = []
                 
-                # Mark added row as reconciled (don't show to QC)
-                add_row["status"] = "RECONCILED"
-                add_row["action"] = "✓ AUTO-FIXED: Content moved to correct block"
-                add_row["changes"] = []
+                rows[add_idx]["status"] = "RECONCILED"
+                rows[add_idx]["action"] = "✓ Content reconciled (same in both versions)"
+                rows[add_idx]["changes"] = []
                 
-                reconciled_indices.add(add_idx)
+                reconciled.add(del_idx)
+                reconciled.add(add_idx)
                 break
     
-    # Filter out RECONCILED rows (they're not problems, they're fixes)
+    # Remove RECONCILED rows (they're not real issues)
     result_rows = [r for r in rows if r["status"] != "RECONCILED"]
     
     return result_rows
