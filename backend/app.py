@@ -1,6 +1,6 @@
 """
 Packaging PDF Comparison - ENHANCED VERSION
-PaddleOCR (better accuracy) + SSIM visual comparison (secondary)
+EasyOCR (better accuracy) + SSIM visual comparison (secondary)
 Content-first, visual-aware approach
 """
 
@@ -25,13 +25,13 @@ import cv2
 import numpy as np
 from skimage.metrics import structural_similarity as ssim
 
-# Better OCR
+# Better OCR - EasyOCR
 try:
-    from paddleocr import PaddleOCR
-    PADDLE_AVAILABLE = True
+    import easyocr
+    EASYOCR_AVAILABLE = True
 except ImportError:
-    PADDLE_AVAILABLE = False
-    logging.warning("PaddleOCR not available - using pdfplumber only")
+    EASYOCR_AVAILABLE = False
+    logging.warning("EasyOCR not available - using pdfplumber only")
 
 app = Flask(__name__)
 CORS(app)
@@ -43,16 +43,18 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_TIMEOUT = int(os.getenv("OPENAI_TIMEOUT", "45"))
 
-# Initialize PaddleOCR once (lazy load)
-ocr = None
-def get_ocr():
-    global ocr
-    if PADDLE_AVAILABLE and ocr is None:
+# Initialize EasyOCR once (lazy load)
+reader = None
+def get_ocr_reader():
+    global reader
+    if EASYOCR_AVAILABLE and reader is None:
         try:
-            ocr = PaddleOCR(use_angle_cls=True, lang='en')
-        except:
-            logger.warning("PaddleOCR init failed - fallback to pdfplumber")
-    return ocr
+            logger.info("Initializing EasyOCR reader...")
+            reader = easyocr.Reader(['en'], gpu=False)
+            logger.info("EasyOCR ready")
+        except Exception as e:
+            logger.warning(f"EasyOCR init failed: {e} - fallback to pdfplumber")
+    return reader
 
 
 # ============================================================================
@@ -121,7 +123,7 @@ def get_visual_change_percentage(images_a: List[np.ndarray], images_b: List[np.n
     
     if similarities:
         avg_sim = np.mean(similarities)
-        return round((1 - avg_sim) * 100, 1)  # Convert to % change
+        return round((1 - avg_sim) * 100, 1)
     return 0.0
 
 
@@ -130,7 +132,7 @@ def get_visual_change_percentage(images_a: List[np.ndarray], images_b: List[np.n
 # ============================================================================
 
 def extract_text_enhanced(file_storage) -> str:
-    """Extract text using both pdfplumber and PaddleOCR for best results"""
+    """Extract text using both pdfplumber and EasyOCR for best results"""
     try:
         if hasattr(file_storage, "seek"):
             file_storage.seek(0)
@@ -138,25 +140,26 @@ def extract_text_enhanced(file_storage) -> str:
         pages = []
         
         with pdfplumber.open(file_storage) as pdf:
-            for page in pdf.pages:
+            for page_num, page in enumerate(pdf.pages):
                 # Try pdfplumber first (faster, structured)
                 text = page.extract_text(layout=True) or page.extract_text() or ""
                 
-                # If pdfplumber got little/nothing, try PaddleOCR
-                if PADDLE_AVAILABLE and (not text or len(text.strip()) < 50):
+                # If pdfplumber got little/nothing, try EasyOCR
+                if EASYOCR_AVAILABLE and (not text or len(text.strip()) < 50):
                     try:
-                        ocr_instance = get_ocr()
-                        if ocr_instance:
+                        ocr_reader = get_ocr_reader()
+                        if ocr_reader:
+                            logger.info(f"Running EasyOCR on page {page_num + 1}")
                             # Convert page to image and OCR
                             img = page.to_image()
                             img_np = cv2.cvtColor(np.array(img.original), cv2.COLOR_RGB2BGR)
-                            result = ocr_instance.ocr(img_np, cls=True)
+                            result = ocr_reader.readtext(img_np)
                             
                             if result:
-                                ocr_text = "\n".join([line[1][0] for line in result[0]])
+                                ocr_text = "\n".join([line[1] for line in result])
                                 text = ocr_text if len(ocr_text) > len(text) else text
                     except Exception as e:
-                        logger.warning(f"PaddleOCR fallback failed: {e}")
+                        logger.warning(f"EasyOCR fallback failed on page {page_num + 1}: {e}")
                 
                 if text.strip():
                     pages.append(text.strip())
@@ -168,7 +171,7 @@ def extract_text_enhanced(file_storage) -> str:
 
 
 # ============================================================================
-# SEGMENTATION - SIMPLE & RELIABLE
+# SEGMENTATION
 # ============================================================================
 
 def segment_text(text: str) -> List[Segment]:
@@ -464,11 +467,11 @@ def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[S
 
 @app.route("/")
 def home():
-    ocr_status = "✓ PaddleOCR available" if PADDLE_AVAILABLE else "⚠️ PaddleOCR not available (using pdfplumber)"
+    ocr_status = "✓ EasyOCR available" if EASYOCR_AVAILABLE else "⚠️ EasyOCR not available (using pdfplumber)"
     return jsonify({
         "status": "API running - ENHANCED VERSION",
         "ocr": ocr_status,
-        "features": ["Enhanced OCR", "Visual comparison (SSIM)", "Smart reconciliation"]
+        "features": ["Enhanced OCR (EasyOCR)", "Visual comparison (SSIM)", "Smart reconciliation"]
     })
 
 
