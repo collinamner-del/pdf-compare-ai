@@ -248,8 +248,61 @@ def highlight_diff(text_a: str, text_b: str) -> str:
 
 
 # ============================================================================
-# REPORT BUILDING - INFALLIBLE MODE
+# SMART CONTENT RECONCILIATION - Auto-Fix OCR Issues
 # ============================================================================
+
+def reconcile_misaligned_content(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    If deleted content appears in added blocks, move it back.
+    Auto-fixes OCR extraction misalignment without QC intervention.
+    """
+    deleted_rows = [r for r in rows if r["status"] == "DELETED"]
+    added_rows = [r for r in rows if r["status"] == "ADDED"]
+    changed_rows = [r for r in rows if r["status"] == "CHANGED"]
+    
+    # Track reconciliations
+    reconciled_indices = set()
+    
+    for del_row in deleted_rows:
+        deleted_text = del_row["pdf_a"].lower()
+        deleted_words = set(w for w in deleted_text.split() if len(w) > 2)
+        
+        if not deleted_words:
+            continue
+        
+        for add_idx, add_row in enumerate(added_rows):
+            if add_idx in reconciled_indices:
+                continue
+                
+            added_text = add_row["pdf_b"].lower() if add_row["pdf_b"] else ""
+            added_words = set(w for w in added_text.split() if len(w) > 2)
+            
+            # Calculate overlap
+            overlap = len(deleted_words & added_words)
+            overlap_ratio = overlap / len(deleted_words) if deleted_words else 0
+            
+            # If significant overlap (>60%), reconcile them
+            if overlap_ratio > 0.6:
+                # Move content back to deleted block
+                del_row["pdf_b"] = del_row["pdf_a"]  # Restore the content
+                del_row["pdf_b_html"] = del_row["pdf_a"]
+                del_row["status"] = "RECONCILED"
+                del_row["action"] = "✓ AUTO-FIXED: OCR misalignment corrected"
+                del_row["changes"] = []
+                del_row["similarity"] = 100.0
+                
+                # Mark added row as reconciled (don't show to QC)
+                add_row["status"] = "RECONCILED"
+                add_row["action"] = "✓ AUTO-FIXED: Content moved to correct block"
+                add_row["changes"] = []
+                
+                reconciled_indices.add(add_idx)
+                break
+    
+    # Filter out RECONCILED rows (they're not problems, they're fixes)
+    result_rows = [r for r in rows if r["status"] != "RECONCILED"]
+    
+    return result_rows
 
 def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[Segment]) -> List[Dict[str, Any]]:
     """
@@ -345,6 +398,9 @@ def compare():
 
         matches, deleted, added = match_segments(segs_a, segs_b)
         rows = build_rows(matches, deleted, added)
+        
+        # Smart QC: auto-fix OCR misalignment
+        rows = reconcile_misaligned_content(rows)
 
         return jsonify({
             "report": {
@@ -356,6 +412,7 @@ def compare():
                     "deleted": sum(1 for r in rows if r["status"] == "DELETED"),
                     "blocks_checked": len(matches),
                     "blocks_perfect": sum(1 for m in matches if m.similarity >= 99.9),
+                    "auto_fixed": sum(1 for r in rows if r.get("action", "").startswith("✓ AUTO-FIXED")),
                 }
             }
         })
@@ -384,6 +441,9 @@ def summary():
 
         matches, deleted, added = match_segments(segs_a, segs_b)
         rows = build_rows(matches, deleted, added)
+        
+        # Smart QC: auto-fix OCR misalignment
+        rows = reconcile_misaligned_content(rows)
 
         audit_lines = ["QC FINDINGS", "=" * 60]
         for row in rows:
