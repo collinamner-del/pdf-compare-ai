@@ -275,15 +275,15 @@ def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[S
         v2_html = highlight_diff(match.seg_a.content, match.seg_b.content)
         
         # Determine status
-        if match.similarity >= 98:
+        if match.similarity >= 99:
             status = "IDENTICAL"
-            action = "✓ No action needed"
-        elif match.similarity >= 85:
+            action = "✓ Verified - no changes"
+        elif match.similarity >= 95:
             status = "MINOR"
-            action = f"⚠️ Review: {len(match.changes)} change(s)"
+            action = f"⚠️ QC REVIEW: {len(match.changes)} change(s)"
         else:
             status = "SIGNIFICANT"
-            action = f"🔴 CHECK: {len(match.changes)} significant change(s)"
+            action = f"🔴 QC REVIEW REQUIRED: {len(match.changes)} change(s)"
 
         rows.append({
             "row_id": f"R{row_id}",
@@ -308,7 +308,7 @@ def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[S
             "pdf_b_html": "<strong style='color:#dc2626;'>❌ DELETED</strong>",
             "status": "DELETED",
             "similarity": 0.0,
-            "action": "❌ VERIFY: Section removed - confirm intentional",
+            "action": "🔴 QC CRITICAL: Section removed - verify intentional",
             "changes": ["Entire section removed"],
         })
         row_id += 1
@@ -323,7 +323,7 @@ def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[S
             "pdf_b_html": f"<mark style='background:#bbf7d0;padding:3px 5px;border-radius:3px;'>{seg.content}</mark>",
             "status": "ADDED",
             "similarity": 0.0,
-            "action": "✓ NEW: Verify content is correct",
+            "action": "⚠️ QC REVIEW: New section added - verify correct",
             "changes": ["New section added"],
         })
         row_id += 1
