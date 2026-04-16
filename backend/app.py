@@ -253,58 +253,59 @@ def highlight_diff(text_a: str, text_b: str) -> str:
 
 def reconcile_misaligned_content(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Global reconciliation: If deleted content appears as added ANYWHERE in report,
-    it's an extraction issue - merge them back together.
+    Global reconciliation: If deleted content appears as added ANYWHERE,
+    it's an extraction issue - remove both false flags.
     """
-    deleted_rows = [i for i, r in enumerate(rows) if r["status"] == "DELETED"]
-    added_rows = [i for i, r in enumerate(rows) if r["status"] == "ADDED"]
-    
-    reconciled = set()
-    
-    # For each deleted row, check ALL added rows
-    for del_idx in deleted_rows:
-        if del_idx in reconciled:
-            continue
-            
-        deleted_content = rows[del_idx]["pdf_a"].lower().strip()
-        deleted_words = set(w for w in deleted_content.split() if len(w) > 2)
+    try:
+        deleted_indices = [i for i, r in enumerate(rows) if r.get("status") == "DELETED"]
+        added_indices = [i for i, r in enumerate(rows) if r.get("status") == "ADDED"]
         
-        if not deleted_words:
-            continue
+        reconciled = set()
         
-        for add_idx in added_rows:
-            if add_idx in reconciled:
+        for del_idx in deleted_indices:
+            if del_idx in reconciled:
                 continue
             
-            added_content = rows[add_idx]["pdf_b"].lower().strip() if rows[add_idx]["pdf_b"] else ""
-            added_words = set(w for w in added_content.split() if len(w) > 2)
+            del_text = rows[del_idx].get("pdf_a", "").lower().strip()
+            del_words = set(w for w in del_text.split() if len(w) > 2)
             
-            # Calculate overlap
-            if not added_words:
+            if len(del_words) < 3:
                 continue
-                
-            overlap = len(deleted_words & added_words)
-            overlap_ratio = overlap / max(len(deleted_words), len(added_words))
             
-            # HIGH overlap (>70%) = same block, just moved/split
-            if overlap_ratio > 0.70:
-                # Mark both as reconciled (they're the same thing)
-                rows[del_idx]["status"] = "RECONCILED"
-                rows[del_idx]["action"] = "✓ Content reconciled (same in both versions)"
-                rows[del_idx]["changes"] = []
+            for add_idx in added_indices:
+                if add_idx in reconciled:
+                    continue
                 
-                rows[add_idx]["status"] = "RECONCILED"
-                rows[add_idx]["action"] = "✓ Content reconciled (same in both versions)"
-                rows[add_idx]["changes"] = []
+                add_text = rows[add_idx].get("pdf_b", "").lower().strip()
+                add_words = set(w for w in add_text.split() if len(w) > 2)
                 
-                reconciled.add(del_idx)
-                reconciled.add(add_idx)
-                break
+                if len(add_words) < 3:
+                    continue
+                
+                overlap = len(del_words & add_words)
+                max_len = max(len(del_words), len(add_words))
+                ratio = overlap / max_len if max_len > 0 else 0
+                
+                # >70% overlap = same content
+                if ratio > 0.70:
+                    rows[del_idx]["status"] = "RECONCILED"
+                    rows[del_idx]["action"] = "✓ Content reconciled"
+                    rows[del_idx]["changes"] = []
+                    
+                    rows[add_idx]["status"] = "RECONCILED"
+                    rows[add_idx]["action"] = "✓ Content reconciled"
+                    rows[add_idx]["changes"] = []
+                    
+                    reconciled.add(del_idx)
+                    reconciled.add(add_idx)
+                    break
+        
+        # Filter out reconciled rows
+        return [r for r in rows if r.get("status") != "RECONCILED"]
     
-    # Remove RECONCILED rows (they're not real issues)
-    result_rows = [r for r in rows if r["status"] != "RECONCILED"]
-    
-    return result_rows
+    except Exception as e:
+        logger.warning(f"Reconciliation error (continuing): {e}")
+        return rows
 
 def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[Segment]) -> List[Dict[str, Any]]:
     """
