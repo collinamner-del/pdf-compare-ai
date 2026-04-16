@@ -341,33 +341,17 @@ html, body {
   background: #f9fafb;
 }
 
-/* Row Status Colors */
-.row-identical {
-  background: #f0fdf4;
+/* Row Status Colors - New Infallible Mode */
+.row-changed {
+  background: #fef2f2;  /* Red tint - needs review */
 }
 
-.row-identical:hover {
-  background: #e0fce7;
-}
-
-.row-minor {
-  background: #fffbeb;
-}
-
-.row-minor:hover {
-  background: #fef3c7;
-}
-
-.row-significant {
-  background: #fef2f2;
-}
-
-.row-significant:hover {
+.row-changed:hover {
   background: #fee2e2;
 }
 
 .row-added {
-  background: #f0fdf4;
+  background: #f0fdf4;  /* Green tint - new content */
 }
 
 .row-added:hover {
@@ -375,7 +359,7 @@ html, body {
 }
 
 .row-deleted {
-  background: #fef2f2;
+  background: #fef2f2;  /* Red tint - removed content */
 }
 
 .row-deleted:hover {
