@@ -237,106 +237,12 @@ def find_changes(text_a: str, text_b: str) -> List[str]:
     return changes[:5]
 
 
-# ============================================================================
-# TABLE-AWARE COMPARISON
-# ============================================================================
-
-def is_table_block(text: str) -> bool:
-    """Detect if text block is a structured table"""
-    text_lower = text.lower()
-    
-    table_keywords = [
-        "nutrition", "typical values", "per 100g", "per 1/7",
-        "oven cook", "gas", "chilled",
-        "energy", "protein", "fat", "carbohydrate"
-    ]
-    
-    keyword_count = sum(1 for kw in table_keywords if kw in text_lower)
-    has_numbers = bool(re.search(r'\d+(?:\.\d+)?(?:\s*[gmkl%°CF])?', text))
-    has_structure = "\n" in text and len(text.split("\n")) > 3
-    
-    return keyword_count >= 1 and has_numbers and has_structure
-
-
-def parse_table_rows(text: str) -> List[str]:
-    """Extract rows from table"""
-    lines = text.strip().split('\n')
-    rows = []
-    
-    for line in lines:
-        stripped = line.strip()
-        if stripped and len(stripped) > 5:
-            rows.append(stripped)
-    
-    return rows
-
-
-def compare_table_rows(rows_a: List[str], rows_b: List[str]) -> str:
-    """Compare tables row by row, highlight changed rows"""
-    result_lines = []
-    matched_b = set()
-    
-    for row_a in rows_a:
-        best_match_idx = None
-        
-        for idx, row_b in enumerate(rows_b):
-            if idx in matched_b:
-                continue
-            
-            # Extract numbers and labels
-            nums_a = re.findall(r'\d+(?:\.\d+)?', row_a)
-            nums_b = re.findall(r'\d+(?:\.\d+)?', row_b)
-            
-            label_a = re.sub(r'\d+(?:\.\d+)?', '', row_a).strip()
-            label_b = re.sub(r'\d+(?:\.\d+)?', '', row_b).strip()
-            
-            if label_a == label_b:
-                if nums_a != nums_b:
-                    # Row changed - highlight it
-                    result_lines.append(
-                        f'<span style="background:#fef2f2;padding:6px 4px;border-left:4px solid #dc2626;display:block;margin:2px 0;">'
-                        f'{row_b}'
-                        f'</span>'
-                    )
-                else:
-                    # Row unchanged
-                    result_lines.append(f'<span style="padding:6px 4px;display:block;margin:2px 0;">{row_b}</span>')
-                
-                matched_b.add(idx)
-                best_match_idx = idx
-                break
-        
-        if best_match_idx is None:
-            result_lines.append(
-                f'<span style="background:#fee2e2;padding:6px 4px;border-left:4px solid #dc2626;display:block;margin:2px 0;">'
-                f'❌ {row_a}'
-                f'</span>'
-            )
-    
-    # Added rows
-    for idx, row_b in enumerate(rows_b):
-        if idx not in matched_b:
-            result_lines.append(
-                f'<span style="background:#d1fae5;padding:6px 4px;border-left:4px solid #10b981;display:block;margin:2px 0;">'
-                f'✨ {row_b}'
-                f'</span>'
-            )
-    
-    return ''.join(result_lines)
-
-
 def highlight_diff(text_a: str, text_b: str) -> str:
-    """Create HTML with highlighting. Handle tables row-by-row."""
+    """Create HTML with highlighting. KEEP ALL V2 TEXT."""
     if text_a == text_b:
-        return text_b  # No changes
+        return text_b  # No changes, return as-is
 
-    # Check if this is a table
-    if is_table_block(text_b):
-        rows_a = parse_table_rows(text_a)
-        rows_b = parse_table_rows(text_b)
-        return compare_table_rows(rows_a, rows_b)
-    
-    # Regular text comparison
+    # Mark changed portions
     matcher = SequenceMatcher(None, text_a, text_b)
     result = []
 
@@ -346,8 +252,10 @@ def highlight_diff(text_a: str, text_b: str) -> str:
         if tag == 'equal':
             result.append(chunk_b)
         elif tag == 'replace' or tag == 'insert':
+            # This part changed or was added
             result.append(f'<mark style="background:#fbbf24;font-weight:bold;padding:2px 3px;border-radius:2px;">{chunk_b}</mark>')
         elif tag == 'delete':
+            # Deleted from A, not in B - skip
             pass
 
     html = ''.join(result)
@@ -359,39 +267,31 @@ def highlight_diff(text_a: str, text_b: str) -> str:
 # ============================================================================
 
 def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[Segment]) -> List[Dict[str, Any]]:
-    """
-    Build report rows - INFALLIBLE MODE.
-    
-    SHOW: Only blocks with changes
-    HIDE: Identical blocks (100% match)
-    EVERY CHANGE: Flagged as "QC REVIEW REQUIRED"
-    
-    Trust: No false confidence. If anything is different, QC sees it.
-    """
+    """Build report rows. EXPLICIT V2 CONTENT."""
     rows = []
     row_id = 1
-    identical_count = 0  # Track perfect blocks (not shown)
 
-    # Matched sections - ONLY SHOW IF THERE'S A CHANGE
+    # Matched sections
     for match in matches:
         v2_html = highlight_diff(match.seg_a.content, match.seg_b.content)
         
-        # SKIP if 100% identical - QC doesn't need to see it
-        if match.similarity >= 99.9:
-            identical_count += 1
-            continue
-        
-        # ANYTHING LESS THAN 100% = QC NEEDS TO REVIEW
-        # No false confidence - even 1 character difference flags it
-        status = "CHANGED"
-        action = f"🔴 QC REVIEW REQUIRED: {len(match.changes)} change(s)"
-        
+        # Determine status
+        if match.similarity >= 99:
+            status = "IDENTICAL"
+            action = "✓ Verified - no changes"
+        elif match.similarity >= 95:
+            status = "MINOR"
+            action = f"⚠️ QC REVIEW: {len(match.changes)} change(s)"
+        else:
+            status = "SIGNIFICANT"
+            action = f"🔴 QC REVIEW REQUIRED: {len(match.changes)} change(s)"
+
         rows.append({
             "row_id": f"R{row_id}",
             "element": match.seg_a.type,
             "pdf_a": match.seg_a.content,
-            "pdf_b": match.seg_b.content,
-            "pdf_b_html": v2_html,
+            "pdf_b": match.seg_b.content,  # FULL V2 TEXT
+            "pdf_b_html": v2_html,  # HIGHLIGHTED V2 TEXT
             "status": status,
             "similarity": round(match.similarity, 1),
             "action": action,
@@ -399,7 +299,7 @@ def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[S
         })
         row_id += 1
 
-    # Deleted sections - ALWAYS CRITICAL
+    # Deleted sections
     for seg in deleted:
         rows.append({
             "row_id": f"R{row_id}",
@@ -409,12 +309,12 @@ def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[S
             "pdf_b_html": "<strong style='color:#dc2626;'>❌ DELETED</strong>",
             "status": "DELETED",
             "similarity": 0.0,
-            "action": "🔴 QC CRITICAL: Section removed",
-            "changes": ["Entire section deleted"],
+            "action": "🔴 QC CRITICAL: Section removed - verify intentional",
+            "changes": ["Entire section removed"],
         })
         row_id += 1
 
-    # Added sections - ALWAYS NEEDS REVIEW
+    # Added sections
     for seg in added:
         rows.append({
             "row_id": f"R{row_id}",
@@ -424,8 +324,8 @@ def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[S
             "pdf_b_html": f"<mark style='background:#bbf7d0;padding:3px 5px;border-radius:3px;'>{seg.content}</mark>",
             "status": "ADDED",
             "similarity": 0.0,
-            "action": "🔴 QC REVIEW: New section added",
-            "changes": ["New section"],
+            "action": "⚠️ QC REVIEW: New section added - verify correct",
+            "changes": ["New section added"],
         })
         row_id += 1
 
@@ -469,12 +369,11 @@ def compare():
                 "comparison_table": rows,
                 "summary": {
                     "total_rows": len(rows),
-                    "total_rows": len(rows),
-                    "changed": sum(1 for r in rows if r["status"] == "CHANGED"),
+                    "identical": sum(1 for r in rows if r["status"] == "IDENTICAL"),
+                    "minor": sum(1 for r in rows if r["status"] == "MINOR"),
+                    "significant": sum(1 for r in rows if r["status"] == "SIGNIFICANT"),
                     "added": sum(1 for r in rows if r["status"] == "ADDED"),
                     "deleted": sum(1 for r in rows if r["status"] == "DELETED"),
-                    "blocks_checked": len(matches),
-                    "blocks_perfect": sum(1 for m in matches if m.similarity >= 99.9),
                 }
             }
         })
