@@ -67,28 +67,37 @@ class BlockMatch:
 # ============================================================================
 
 def extract_text_with_positions(file_storage) -> List[Dict[str, Any]]:
-    """Extract characters with their bounding boxes (x0, y0, x1, y1)"""
+    """Extract words with their bounding boxes (x0, y0, x1, y1)"""
     try:
         if hasattr(file_storage, "seek"):
             file_storage.seek(0)
 
-        chars = []
+        words = []
         with pdfplumber.open(file_storage) as pdf:
             for page_num, page in enumerate(pdf.pages, start=1):
-                # Get character-level data with bounding boxes
-                page_chars = page.extract_words(x_tolerance=3, y_tolerance=3)
-                
-                for word in page_chars:
-                    chars.append({
-                        "text": word["text"],
-                        "x0": word["x0"],
-                        "y0": word["y0"],
-                        "x1": word["x1"],
-                        "y1": word["y1"],
-                        "page": page_num,
-                    })
+                try:
+                    # Extract words with bounding boxes
+                    page_words = page.extract_words(x_tolerance=3, y_tolerance=3)
+                    
+                    if page_words:
+                        for word in page_words:
+                            if all(key in word for key in ["text", "x0", "y0", "x1", "y1"]):
+                                words.append({
+                                    "text": word["text"],
+                                    "x0": float(word["x0"]),
+                                    "y0": float(word["y0"]),
+                                    "x1": float(word["x1"]),
+                                    "y1": float(word["y1"]),
+                                    "page": page_num,
+                                })
+                except Exception as page_exc:
+                    logger.warning(f"Page {page_num} extraction issue: {page_exc}")
+                    continue
 
-        return chars
+        if not words:
+            raise RuntimeError("No text extracted from PDFs")
+
+        return words
 
     except Exception as exc:
         raise RuntimeError(f"Text extraction failed: {exc}") from exc
@@ -102,18 +111,28 @@ def cluster_blocks_by_position(chars: List[Dict[str, Any]]) -> List[Block]:
     """
     Group characters into blocks using spatial clustering.
     Characters close together (same line, nearby columns) = same block.
+    Handles edge cases and malformed PDFs gracefully.
     """
-    if not chars:
+    if not chars or len(chars) < 2:
         return []
 
     blocks = []
     used = set()
 
     # Sort by Y position (top to bottom), then X (left to right)
-    sorted_chars = sorted(chars, key=lambda c: (round(c["y0"], 1), c["x0"]))
+    try:
+        sorted_chars = sorted(chars, key=lambda c: (round(c.get("y0", 0), 1), c.get("x0", 0)))
+    except Exception as e:
+        logger.warning(f"Sorting failed: {e}. Using unsorted list.")
+        sorted_chars = chars
 
     for idx, char in enumerate(sorted_chars):
         if idx in used:
+            continue
+
+        # Validate char has required fields
+        if not all(key in char for key in ["text", "x0", "y0", "x1", "y1"]):
+            used.add(idx)
             continue
 
         # Start a new block with this character
@@ -121,40 +140,55 @@ def cluster_blocks_by_position(chars: List[Dict[str, Any]]) -> List[Block]:
         used.add(idx)
         
         # Find all characters that belong to this block
-        # Same "line" if Y-coordinates overlap (±5px tolerance)
-        y_min = char["y0"] - 5
-        y_max = char["y1"] + 5
+        y_min = char.get("y0", 0) - 5
+        y_max = char.get("y1", 0) + 5
+        last_x1 = char.get("x1", 0)
 
         for idx2, char2 in enumerate(sorted_chars):
             if idx2 in used:
                 continue
             
+            # Validate char2
+            if not all(key in char2 for key in ["text", "x0", "y0", "x1", "y1"]):
+                continue
+            
             # Same line?
-            if y_min <= char2["y0"] <= y_max or y_min <= char2["y1"] <= y_max:
+            char2_y0 = char2.get("y0", 0)
+            char2_y1 = char2.get("y1", 0)
+            if y_min <= char2_y0 <= y_max or y_min <= char2_y1 <= y_max:
                 # And roughly same X area (same horizontal zone)?
-                # Only add if it's not a huge gap away
-                if abs(char2["x0"] - block_chars[-1]["x1"]) < 50:  # 50px tolerance
+                char2_x0 = char2.get("x0", 0)
+                if abs(char2_x0 - last_x1) < 50:  # 50px tolerance
                     block_chars.append(char2)
                     used.add(idx2)
+                    last_x1 = char2.get("x1", 0)
 
         # Create block from grouped characters
         if block_chars:
-            text = " ".join([c["text"] for c in block_chars])
-            x_coords = [c["x0"] for c in block_chars] + [c["x1"] for c in block_chars]
-            y_coords = [c["y0"] for c in block_chars] + [c["y1"] for c in block_chars]
-
-            block = Block(
-                text=text,
-                x0=min(x_coords),
-                y0=min(y_coords),
-                x1=max(x_coords),
-                y1=max(y_coords),
-                block_type=detect_block_type(text),
-            )
+            text = " ".join([c.get("text", "") for c in block_chars]).strip()
             
-            # Only keep blocks with meaningful content
-            if len(text.strip()) > 5:
-                blocks.append(block)
+            if not text:
+                continue
+            
+            try:
+                x_coords = [c.get("x0", 0) for c in block_chars] + [c.get("x1", 0) for c in block_chars]
+                y_coords = [c.get("y0", 0) for c in block_chars] + [c.get("y1", 0) for c in block_chars]
+
+                block = Block(
+                    text=text,
+                    x0=min(x_coords) if x_coords else 0,
+                    y0=min(y_coords) if y_coords else 0,
+                    x1=max(x_coords) if x_coords else 0,
+                    y1=max(y_coords) if y_coords else 0,
+                    block_type=detect_block_type(text),
+                )
+                
+                # Only keep blocks with meaningful content
+                if len(text.strip()) > 5:
+                    blocks.append(block)
+            except Exception as e:
+                logger.warning(f"Block creation error: {e}")
+                continue
 
     return blocks
 
