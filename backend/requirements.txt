@@ -5,8 +5,9 @@ gunicorn==21.2.0
 python-dotenv==1.0.0
 requests==2.31.0
 pdf2image==1.16.3
-paddleocr==2.7.0.3
-opencv-python>=4.5.0,<4.6.0
-numpy>=1.23.0
-scikit-image>=0.20.0
-Pillow>=9.5.0
+easyocr>=1.7.0
+opencv-python>=4.8.0
+scikit-image>=0.23.0
+numpy>=1.26.0
+Pillow>=10.0.0
+torch>=2.0.0
