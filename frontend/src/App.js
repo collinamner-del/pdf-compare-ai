@@ -141,20 +141,16 @@ export default function App() {
             <h2>📊 Detailed Comparison Report</h2>
             <div className="summary-stats">
               <div className="stat">
-                <span className="stat-label">Total Items</span>
-                <span className="stat-value">{report.summary.total_rows}</span>
+                <span className="stat-label">Sections Checked</span>
+                <span className="stat-value">{report.summary.blocks_checked}</span>
               </div>
               <div className="stat stat-identical">
-                <span className="stat-label">✓ Identical</span>
-                <span className="stat-value stat-identical">{report.summary.identical}</span>
-              </div>
-              <div className="stat stat-modified">
-                <span className="stat-label">⚠️ Minor Changes</span>
-                <span className="stat-value stat-modified">{report.summary.minor}</span>
+                <span className="stat-label">✓ Perfect</span>
+                <span className="stat-value stat-identical">{report.summary.blocks_perfect}</span>
               </div>
               <div className="stat stat-significant">
-                <span className="stat-label">🔴 Significant</span>
-                <span className="stat-value stat-significant">{report.summary.significant}</span>
+                <span className="stat-label">🔴 Needs Review</span>
+                <span className="stat-value stat-significant">{report.summary.changed}</span>
               </div>
               <div className="stat stat-added">
                 <span className="stat-label">✨ Added</span>
