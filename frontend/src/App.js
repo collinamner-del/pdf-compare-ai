@@ -12,9 +12,15 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
+  const handleFileChange = (e, fileNumber) => {
+    const file = e.target.files?.[0] || null;
+    if (fileNumber === 1) setFile1(file);
+    else setFile2(file);
+  };
+
   const handleCompare = async () => {
     if (!file1 || !file2) {
-      setError("Select both PDFs");
+      setError("Please select both PDF files to compare");
       return;
     }
 
@@ -32,10 +38,9 @@ export default function App() {
         headers: { "Content-Type": "multipart/form-data" },
       });
 
-      console.log("Response:", response.data);
       setReport(response.data.report);
     } catch (err) {
-      setError(err.response?.data?.error || "Comparison failed");
+      setError(err.response?.data?.error || "Comparison failed. Please try again.");
       console.error("Error:", err);
     } finally {
       setLoading(false);
@@ -44,7 +49,7 @@ export default function App() {
 
   const handleSummary = async () => {
     if (!file1 || !file2) {
-      setError("Select both PDFs");
+      setError("Please select both PDF files");
       return;
     }
 
@@ -62,7 +67,7 @@ export default function App() {
 
       setSummary(response.data.summary);
     } catch (err) {
-      setError(err.response?.data?.error || "Summary failed");
+      setError(err.response?.data?.error || "Summary generation failed");
     } finally {
       setLoading(false);
     }
@@ -70,35 +75,37 @@ export default function App() {
 
   return (
     <div className="app-container">
+      {/* HEADER */}
       <header className="header">
-        <h1>📦 Packaging QC Audit</h1>
-        <p>Precise change detection with ACTION-focused reporting</p>
+        <h1>📦 Packaging QC Audit Tool</h1>
+        <p>Professional change detection with spatial awareness</p>
       </header>
 
+      {/* UPLOAD SECTION */}
       <section className="upload-section">
         <div className="upload-group">
           <label className="upload-label">
-            <span>📄 PDF #1 (Original)</span>
+            <span>📄 Original PDF (Version A)</span>
             <input
               type="file"
               accept=".pdf"
-              onChange={(e) => setFile1(e.target.files?.[0] || null)}
+              onChange={(e) => handleFileChange(e, 1)}
               disabled={loading}
             />
-            {file1 && <span className="file-name">{file1.name}</span>}
+            {file1 && <span className="file-name">✓ {file1.name}</span>}
           </label>
         </div>
 
         <div className="upload-group">
           <label className="upload-label">
-            <span>📄 PDF #2 (Updated)</span>
+            <span>📄 Updated PDF (Version B)</span>
             <input
               type="file"
               accept=".pdf"
-              onChange={(e) => setFile2(e.target.files?.[0] || null)}
+              onChange={(e) => handleFileChange(e, 2)}
               disabled={loading}
             />
-            {file2 && <span className="file-name">{file2.name}</span>}
+            {file2 && <span className="file-name">✓ {file2.name}</span>}
           </label>
         </div>
 
@@ -108,7 +115,7 @@ export default function App() {
             onClick={handleCompare}
             disabled={!file1 || !file2 || loading}
           >
-            {loading ? "⏳ Analyzing..." : "🔍 Compare"}
+            {loading ? "⏳ Analyzing..." : "🔍 Compare Documents"}
           </button>
           <button
             className="btn btn-summary"
@@ -120,34 +127,40 @@ export default function App() {
         </div>
       </section>
 
-      {error && <div className="error-section">⚠️ {error}</div>}
+      {/* ERROR DISPLAY */}
+      {error && (
+        <div className="error-section">
+          ⚠️ {error}
+        </div>
+      )}
 
+      {/* REPORT SECTION */}
       {report && (
         <section className="report-section">
           <div className="report-header">
-            <h2>📋 Change Report</h2>
+            <h2>📊 Detailed Comparison Report</h2>
             <div className="summary-stats">
               <div className="stat">
-                <span className="stat-label">Total</span>
+                <span className="stat-label">Total Items</span>
                 <span className="stat-value">{report.summary.total_rows}</span>
               </div>
-              <div className="stat">
+              <div className="stat stat-identical">
                 <span className="stat-label">✓ Identical</span>
                 <span className="stat-value stat-identical">{report.summary.identical}</span>
               </div>
-              <div className="stat">
-                <span className="stat-label">⚠️ Minor</span>
+              <div className="stat stat-modified">
+                <span className="stat-label">⚠️ Minor Changes</span>
                 <span className="stat-value stat-modified">{report.summary.minor}</span>
               </div>
-              <div className="stat">
+              <div className="stat stat-significant">
                 <span className="stat-label">🔴 Significant</span>
                 <span className="stat-value stat-significant">{report.summary.significant}</span>
               </div>
-              <div className="stat">
+              <div className="stat stat-added">
                 <span className="stat-label">✨ Added</span>
                 <span className="stat-value stat-added">{report.summary.added}</span>
               </div>
-              <div className="stat">
+              <div className="stat stat-deleted">
                 <span className="stat-label">❌ Deleted</span>
                 <span className="stat-value stat-deleted">{report.summary.deleted}</span>
               </div>
@@ -159,9 +172,9 @@ export default function App() {
               <thead>
                 <tr>
                   <th className="col-element">Element</th>
-                  <th className="col-v1">Version A (Original)</th>
-                  <th className="col-v2">Version B (Updated) ← Changes</th>
-                  <th className="col-action">ACTION FOR QC</th>
+                  <th className="col-v1">Version A</th>
+                  <th className="col-v2">Version B (Changes Highlighted)</th>
+                  <th className="col-action">Action Required</th>
                 </tr>
               </thead>
               <tbody>
@@ -206,6 +219,7 @@ export default function App() {
         </section>
       )}
 
+      {/* SUMMARY SECTION */}
       {summary && (
         <section className="summary-section">
           <h2>✅ QC Verification Checklist</h2>
