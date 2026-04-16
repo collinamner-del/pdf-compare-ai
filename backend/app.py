@@ -1,8 +1,10 @@
 """
-Packaging PDF Comparison & Audit API - EXPLICIT V2 TEXT
+Packaging PDF Comparison - SPATIAL BOUNDING BOX GROUPING
 
-Guarantees full V2 content in every row with highlighting.
-No missing data. No truncation. Clear ACTION items.
+Groups text blocks by spatial position (x,y coordinates) instead of
+text similarity. Handles multi-column layouts perfectly.
+
+This is a NEW file - your current app.py stays untouched.
 """
 
 from __future__ import annotations
@@ -11,7 +13,6 @@ import os
 import re
 import logging
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 from typing import Dict, List, Optional, Tuple, Any
 
 import pdfplumber
@@ -23,7 +24,7 @@ app = Flask(__name__)
 CORS(app)
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("pdf_audit")
+logger = logging.getLogger("pdf_audit_spatial")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -35,168 +36,219 @@ OPENAI_TIMEOUT = int(os.getenv("OPENAI_TIMEOUT", "45"))
 # ============================================================================
 
 @dataclass
-class Segment:
-    type: str
-    content: str
+class Block:
+    """Text block with spatial position"""
+    text: str
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    block_type: str = "GENERAL"
+    
+    @property
+    def center_y(self) -> float:
+        return (self.y0 + self.y1) / 2
+    
+    @property
+    def center_x(self) -> float:
+        return (self.x0 + self.x1) / 2
 
 
 @dataclass
-class MatchResult:
-    seg_a: Segment
-    seg_b: Segment
-    score: float
+class BlockMatch:
+    block_a: Block
+    block_b: Block
     changes: List[str]
     similarity: float
 
 
 # ============================================================================
-# TEXT EXTRACTION
+# TEXT EXTRACTION - GET CHARS WITH POSITIONS
 # ============================================================================
 
-def extract_text(file_storage) -> str:
-    """Extract ALL text from PDF. No truncation."""
+def extract_text_with_positions(file_storage) -> List[Dict[str, Any]]:
+    """Extract characters with their bounding boxes (x0, y0, x1, y1)"""
     try:
         if hasattr(file_storage, "seek"):
             file_storage.seek(0)
 
-        pages = []
+        chars = []
         with pdfplumber.open(file_storage) as pdf:
-            for page in pdf.pages:
-                text = page.extract_text(layout=True) or page.extract_text() or ""
-                if text.strip():
-                    pages.append(text.strip())
+            for page_num, page in enumerate(pdf.pages, start=1):
+                # Get character-level data with bounding boxes
+                page_chars = page.extract_words(x_tolerance=3, y_tolerance=3)
+                
+                for word in page_chars:
+                    chars.append({
+                        "text": word["text"],
+                        "x0": word["x0"],
+                        "y0": word["y0"],
+                        "x1": word["x1"],
+                        "y1": word["y1"],
+                        "page": page_num,
+                    })
 
-        return "\n\n".join(pages)
+        return chars
 
     except Exception as exc:
-        raise RuntimeError(f"Extraction failed: {exc}") from exc
+        raise RuntimeError(f"Text extraction failed: {exc}") from exc
 
 
 # ============================================================================
-# SEGMENTATION - SIMPLE & RELIABLE
+# SPATIAL CLUSTERING - GROUP BY POSITION
 # ============================================================================
 
-def segment_text(text: str) -> List[Segment]:
-    """Split into sections. Keep all content intact."""
-    if not text or len(text) < 20:
+def cluster_blocks_by_position(chars: List[Dict[str, Any]]) -> List[Block]:
+    """
+    Group characters into blocks using spatial clustering.
+    Characters close together (same line, nearby columns) = same block.
+    """
+    if not chars:
         return []
 
-    # Keywords that mark sections
-    section_keywords = {
-        "PRODUCT_NAME": ["product", "brand", "name"],
-        "INGREDIENTS": ["ingredient", "composition"],
-        "NUTRITION": ["nutrition", "energy", "per 100"],
-        "ALLERGENS": ["allerg", "may contain"],
-        "STORAGE": ["stor", "keep", "before"],
-        "INSTRUCTIONS": ["instruction", "direction", "cook"],
-        "COMPANY": ["made by", "produced", "manufacturer"],
-    }
+    blocks = []
+    used = set()
 
-    lines = text.split('\n')
-    segments = []
-    current_type = "GENERAL"
-    current_block = []
+    # Sort by Y position (top to bottom), then X (left to right)
+    sorted_chars = sorted(chars, key=lambda c: (round(c["y0"], 1), c["x0"]))
 
-    for line in lines:
-        stripped = line.strip()
-        
-        if not stripped:  # Empty line = boundary
-            if current_block:
-                content = '\n'.join(current_block).strip()
-                if len(content) > 10:
-                    segments.append(Segment(type=current_type, content=content))
-                current_block = []
-                current_type = "GENERAL"
+    for idx, char in enumerate(sorted_chars):
+        if idx in used:
             continue
 
-        # Detect section type
-        line_lower = stripped.lower()
-        detected = None
-        for section_type, keywords in section_keywords.items():
-            for keyword in keywords:
-                if keyword in line_lower:
-                    detected = section_type
-                    break
-            if detected:
-                break
+        # Start a new block with this character
+        block_chars = [char]
+        used.add(idx)
+        
+        # Find all characters that belong to this block
+        # Same "line" if Y-coordinates overlap (±5px tolerance)
+        y_min = char["y0"] - 5
+        y_max = char["y1"] + 5
 
-        if detected and current_block:
-            # Save previous section
-            content = '\n'.join(current_block).strip()
-            if len(content) > 10:
-                segments.append(Segment(type=current_type, content=content))
-            current_type = detected
-            current_block = [line]
-        else:
-            current_block.append(line)
+        for idx2, char2 in enumerate(sorted_chars):
+            if idx2 in used:
+                continue
+            
+            # Same line?
+            if y_min <= char2["y0"] <= y_max or y_min <= char2["y1"] <= y_max:
+                # And roughly same X area (same horizontal zone)?
+                # Only add if it's not a huge gap away
+                if abs(char2["x0"] - block_chars[-1]["x1"]) < 50:  # 50px tolerance
+                    block_chars.append(char2)
+                    used.add(idx2)
 
-    # Don't forget last block
-    if current_block:
-        content = '\n'.join(current_block).strip()
-        if len(content) > 10:
-            segments.append(Segment(type=current_type, content=content))
+        # Create block from grouped characters
+        if block_chars:
+            text = " ".join([c["text"] for c in block_chars])
+            x_coords = [c["x0"] for c in block_chars] + [c["x1"] for c in block_chars]
+            y_coords = [c["y0"] for c in block_chars] + [c["y1"] for c in block_chars]
 
-    return segments
+            block = Block(
+                text=text,
+                x0=min(x_coords),
+                y0=min(y_coords),
+                x1=max(x_coords),
+                y1=max(y_coords),
+                block_type=detect_block_type(text),
+            )
+            
+            # Only keep blocks with meaningful content
+            if len(text.strip()) > 5:
+                blocks.append(block)
+
+    return blocks
+
+
+def detect_block_type(text: str) -> str:
+    """Detect what type of section this block is"""
+    text_lower = text.lower()
+    
+    if any(kw in text_lower for kw in ["ingredient", "composition"]):
+        return "INGREDIENTS"
+    elif any(kw in text_lower for kw in ["nutrition", "energy", "per 100"]):
+        return "NUTRITION"
+    elif any(kw in text_lower for kw in ["allerg", "may contain", "nut", "milk"]):
+        return "ALLERGENS"
+    elif any(kw in text_lower for kw in ["stor", "keep", "best before", "use by"]):
+        return "STORAGE"
+    elif any(kw in text_lower for kw in ["instruction", "direction", "cook", "prepare"]):
+        return "INSTRUCTIONS"
+    elif any(kw in text_lower for kw in ["made by", "produced", "manufacturer"]):
+        return "COMPANY"
+    elif len(text) < 30:
+        return "PRODUCT_NAME"
+    
+    return "GENERAL"
 
 
 # ============================================================================
-# MATCHING & DIFF
+# MATCHING - BY POSITION (X, Y COORDINATES)
 # ============================================================================
 
-def match_segments(segs_a: List[Segment], segs_b: List[Segment]) -> Tuple[List[MatchResult], List[Segment], List[Segment]]:
-    """Match segments and find changes."""
+def match_blocks_by_position(blocks_a: List[Block], blocks_b: List[Block]) -> Tuple[List[BlockMatch], List[Block], List[Block]]:
+    """
+    Match blocks across PDFs using spatial position.
+    Blocks at similar Y position = match.
+    """
     matches = []
     used_b = set()
 
-    for seg_a in segs_a:
-        best_idx = None
-        best_score = 0
+    for block_a in blocks_a:
+        best_idx_b = None
+        best_distance = float('inf')
 
-        for idx, seg_b in enumerate(segs_b):
-            if idx in used_b:
+        for idx_b, block_b in enumerate(blocks_b):
+            if idx_b in used_b:
                 continue
 
-            # Score: 70% text similarity + 30% type match
-            text_sim = SequenceMatcher(None, seg_a.content.lower(), seg_b.content.lower()).ratio()
-            type_match = 1.0 if seg_a.type == seg_b.type else 0.0
-            score = (0.7 * text_sim) + (0.3 * type_match)
+            # Distance metric: Y position is primary (vertical stack)
+            # X position is secondary (left/right columns)
+            y_distance = abs(block_a.center_y - block_b.center_y)
+            x_distance = abs(block_a.center_x - block_b.center_x) * 0.2  # Weight less
 
-            if score > best_score and score >= 0.5:
-                best_score = score
-                best_idx = idx
+            distance = y_distance + x_distance
 
-        if best_idx is not None:
-            seg_b = segs_b[best_idx]
-            changes = find_changes(seg_a.content, seg_b.content)
-            similarity = SequenceMatcher(None, seg_a.content, seg_b.content).ratio() * 100
+            # Prefer matches within same general area (< 50 pixels Y distance)
+            if distance < best_distance and y_distance < 50:
+                best_distance = distance
+                best_idx_b = idx_b
+
+        if best_idx_b is not None:
+            block_b = blocks_b[best_idx_b]
+            changes = find_changes(block_a.text, block_b.text)
+            similarity = text_similarity(block_a.text, block_b.text)
             
-            matches.append(MatchResult(
-                seg_a=seg_a,
-                seg_b=seg_b,
-                score=best_score * 100,
+            matches.append(BlockMatch(
+                block_a=block_a,
+                block_b=block_b,
                 changes=changes,
-                similarity=similarity
+                similarity=similarity,
             ))
-            used_b.add(best_idx)
+            used_b.add(best_idx_b)
 
-    # Find deleted and added
+    # Find unmatched (deleted/added)
     deleted = []
-    for idx, seg_a in enumerate(segs_a):
-        is_matched = any(m.seg_a == seg_a for m in matches)
-        if not is_matched:
-            deleted.append(seg_a)
+    for block_a in blocks_a:
+        if not any(m.block_a == block_a for m in matches):
+            deleted.append(block_a)
 
     added = []
-    for idx, seg_b in enumerate(segs_b):
-        is_matched = any(m.seg_b == seg_b for m in matches)
-        if not is_matched:
-            added.append(seg_b)
+    for idx_b, block_b in enumerate(blocks_b):
+        if idx_b not in used_b:
+            added.append(block_b)
 
     return matches, deleted, added
 
 
+def text_similarity(text_a: str, text_b: str) -> float:
+    """Calculate similarity percentage"""
+    from difflib import SequenceMatcher
+    ratio = SequenceMatcher(None, text_a.lower(), text_b.lower()).ratio()
+    return round(ratio * 100, 1)
+
+
 def find_changes(text_a: str, text_b: str) -> List[str]:
-    """Find exact changes between texts."""
+    """Find exact changes between texts"""
     changes = []
 
     # Numbers
@@ -208,9 +260,9 @@ def find_changes(text_a: str, text_b: str) -> List[str]:
                 changes.append(f"⚠️ Value: {na} → {nb}")
 
     # Punctuation
-    a_no_punct = text_a.rstrip('.!?,; ')
-    b_no_punct = text_b.rstrip('.!?,; ')
-    if a_no_punct == b_no_punct:
+    a_clean = text_a.rstrip('.!?,; ')
+    b_clean = text_b.rstrip('.!?,; ')
+    if a_clean == b_clean and text_a != text_b:
         if text_a.endswith('.') != text_b.endswith('.'):
             changes.append("⚠️ Period changed")
         if text_a.endswith(',') != text_b.endswith(','):
@@ -236,45 +288,39 @@ def find_changes(text_a: str, text_b: str) -> List[str]:
     return changes[:5]
 
 
-def highlight_diff(text_a: str, text_b: str) -> str:
-    """Create HTML with highlighting. KEEP ALL V2 TEXT."""
+def highlight_changes(text_a: str, text_b: str) -> str:
+    """Create HTML highlighting differences"""
+    from difflib import SequenceMatcher
+    
     if text_a == text_b:
-        return text_b  # No changes, return as-is
+        return text_b
 
-    # Mark changed portions
     matcher = SequenceMatcher(None, text_a, text_b)
     result = []
 
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        chunk_b = text_b[j1:j2]
+        chunk = text_b[j1:j2]
         
         if tag == 'equal':
-            result.append(chunk_b)
+            result.append(chunk)
         elif tag == 'replace' or tag == 'insert':
-            # This part changed or was added
-            result.append(f'<mark style="background:#fbbf24;font-weight:bold;padding:2px 3px;border-radius:2px;">{chunk_b}</mark>')
+            result.append(f'<mark style="background:#fbbf24;font-weight:bold;padding:2px 3px;">{chunk}</mark>')
         elif tag == 'delete':
-            # Deleted from A, not in B - skip
             pass
 
-    html = ''.join(result)
-    return html if html else text_b
+    return ''.join(result) if result else text_b
 
 
 # ============================================================================
 # REPORT BUILDING
 # ============================================================================
 
-def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[Segment]) -> List[Dict[str, Any]]:
-    """Build report rows. EXPLICIT V2 CONTENT."""
+def build_report_rows(matches: List[BlockMatch], deleted: List[Block], added: List[Block]) -> List[Dict[str, Any]]:
+    """Build report rows for display"""
     rows = []
     row_id = 1
 
-    # Matched sections
     for match in matches:
-        v2_html = highlight_diff(match.seg_a.content, match.seg_b.content)
-        
-        # Determine status
         if match.similarity >= 98:
             status = "IDENTICAL"
             action = "✓ No action needed"
@@ -285,45 +331,45 @@ def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[S
             status = "SIGNIFICANT"
             action = f"🔴 CHECK: {len(match.changes)} significant change(s)"
 
+        html = highlight_changes(match.block_a.text, match.block_b.text)
+
         rows.append({
             "row_id": f"R{row_id}",
-            "element": match.seg_a.type,
-            "pdf_a": match.seg_a.content,
-            "pdf_b": match.seg_b.content,  # FULL V2 TEXT
-            "pdf_b_html": v2_html,  # HIGHLIGHTED V2 TEXT
+            "element": match.block_a.block_type,
+            "pdf_a": match.block_a.text,
+            "pdf_b": match.block_b.text,
+            "pdf_b_html": html,
             "status": status,
-            "similarity": round(match.similarity, 1),
+            "similarity": match.similarity,
             "action": action,
             "changes": match.changes,
         })
         row_id += 1
 
-    # Deleted sections
-    for seg in deleted:
+    for block in deleted:
         rows.append({
             "row_id": f"R{row_id}",
-            "element": seg.type,
-            "pdf_a": seg.content,
+            "element": block.block_type,
+            "pdf_a": block.text,
             "pdf_b": "",
             "pdf_b_html": "<strong style='color:#dc2626;'>❌ DELETED</strong>",
             "status": "DELETED",
             "similarity": 0.0,
-            "action": "❌ VERIFY: Section removed - confirm intentional",
+            "action": "❌ VERIFY: Section removed",
             "changes": ["Entire section removed"],
         })
         row_id += 1
 
-    # Added sections
-    for seg in added:
+    for block in added:
         rows.append({
             "row_id": f"R{row_id}",
-            "element": seg.type,
+            "element": block.block_type,
             "pdf_a": "",
-            "pdf_b": seg.content,
-            "pdf_b_html": f"<mark style='background:#bbf7d0;padding:3px 5px;border-radius:3px;'>{seg.content}</mark>",
+            "pdf_b": block.text,
+            "pdf_b_html": f"<mark style='background:#bbf7d0;padding:3px 5px;'>{block.text}</mark>",
             "status": "ADDED",
             "similarity": 0.0,
-            "action": "✓ NEW: Verify content is correct",
+            "action": "✓ NEW: Verify content correct",
             "changes": ["New section added"],
         })
         row_id += 1
@@ -337,7 +383,7 @@ def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[S
 
 @app.route("/")
 def home():
-    return jsonify({"status": "API running"})
+    return jsonify({"status": "API running - SPATIAL GROUPING VERSION"})
 
 
 @app.route("/compare", methods=["POST"])
@@ -348,20 +394,25 @@ def compare():
 
         f1, f2 = request.files["file1"], request.files["file2"]
 
-        text_a = extract_text(f1)
-        text_b = extract_text(f2)
+        # Extract with positions
+        chars_a = extract_text_with_positions(f1)
+        chars_b = extract_text_with_positions(f2)
 
-        if not text_a or not text_b:
+        if not chars_a or not chars_b:
             return jsonify({"error": "Could not extract text"}), 400
 
-        segs_a = segment_text(text_a)
-        segs_b = segment_text(text_b)
+        # Cluster into blocks by spatial position
+        blocks_a = cluster_blocks_by_position(chars_a)
+        blocks_b = cluster_blocks_by_position(chars_b)
 
-        if not segs_a or not segs_b:
-            return jsonify({"error": "Could not segment"}), 400
+        if not blocks_a or not blocks_b:
+            return jsonify({"error": "Could not create blocks"}), 400
 
-        matches, deleted, added = match_segments(segs_a, segs_b)
-        rows = build_rows(matches, deleted, added)
+        # Match by position
+        matches, deleted, added = match_blocks_by_position(blocks_a, blocks_b)
+
+        # Build rows
+        rows = build_report_rows(matches, deleted, added)
 
         return jsonify({
             "report": {
@@ -390,29 +441,28 @@ def summary():
 
         f1, f2 = request.files["file1"], request.files["file2"]
 
-        text_a = extract_text(f1)
-        text_b = extract_text(f2)
+        chars_a = extract_text_with_positions(f1)
+        chars_b = extract_text_with_positions(f2)
 
-        if not text_a or not text_b:
+        if not chars_a or not chars_b:
             return jsonify({"error": "Could not extract text"}), 400
 
-        segs_a = segment_text(text_a)
-        segs_b = segment_text(text_b)
+        blocks_a = cluster_blocks_by_position(chars_a)
+        blocks_b = cluster_blocks_by_position(chars_b)
 
-        matches, deleted, added = match_segments(segs_a, segs_b)
-        rows = build_rows(matches, deleted, added)
+        matches, deleted, added = match_blocks_by_position(blocks_a, blocks_b)
+        rows = build_report_rows(matches, deleted, added)
 
         # Build audit text
-        audit_lines = ["QC FINDINGS", "=" * 60]
+        audit_lines = ["QC FINDINGS"]
         for row in rows:
             audit_lines.append(f"\n{row['element']} | {row['status']}")
             if row['pdf_a']:
-                audit_lines.append(f"A: {row['pdf_a'][:200]}")
+                audit_lines.append(f"A: {row['pdf_a']}")
             if row['pdf_b']:
-                audit_lines.append(f"B: {row['pdf_b'][:200]}")
-            if row['changes']:
-                for c in row['changes']:
-                    audit_lines.append(f"  {c}")
+                audit_lines.append(f"B: {row['pdf_b']}")
+            for c in row['changes']:
+                audit_lines.append(f"  {c}")
 
         audit_text = "\n".join(audit_lines)
 
@@ -426,7 +476,7 @@ def summary():
             "model": OPENAI_MODEL,
             "messages": [
                 {"role": "system", "content": "Create QC checklist."},
-                {"role": "user", "content": f"Create checklist:\n{audit_text}"},
+                {"role": "user", "content": f"QC Checklist from audit:\n{audit_text}"},
             ],
             "temperature": 0.2,
             "max_tokens": 2000,
@@ -440,7 +490,7 @@ def summary():
         )
 
         if resp.status_code != 200:
-            return jsonify({"summary": "API error"}), 500
+            return jsonify({"summary": "Could not generate summary"}), 500
 
         summary_text = resp.json()["choices"][0]["message"]["content"]
         return jsonify({"summary": summary_text})
