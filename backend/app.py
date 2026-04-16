@@ -395,7 +395,7 @@ def match_blocks(blocks_a: List[Block], blocks_b: List[Block]) -> Tuple[List[Blo
             used_b.add(best_idx)
 
     deleted = [b for b in blocks_a if not any(m.block_a == b for m in matches)]
-    added = [b for b in blocks_b if blocks_b.index(b) not in used_b]
+    added = [blocks_b[i] for i in range(len(blocks_b)) if i not in used_b]
 
     return matches, deleted, added
 
