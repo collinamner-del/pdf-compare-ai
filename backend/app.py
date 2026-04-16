@@ -237,12 +237,106 @@ def find_changes(text_a: str, text_b: str) -> List[str]:
     return changes[:5]
 
 
-def highlight_diff(text_a: str, text_b: str) -> str:
-    """Create HTML with highlighting. KEEP ALL V2 TEXT."""
-    if text_a == text_b:
-        return text_b  # No changes, return as-is
+# ============================================================================
+# TABLE-AWARE COMPARISON
+# ============================================================================
 
-    # Mark changed portions
+def is_table_block(text: str) -> bool:
+    """Detect if text block is a structured table"""
+    text_lower = text.lower()
+    
+    table_keywords = [
+        "nutrition", "typical values", "per 100g", "per 1/7",
+        "oven cook", "gas", "chilled",
+        "energy", "protein", "fat", "carbohydrate"
+    ]
+    
+    keyword_count = sum(1 for kw in table_keywords if kw in text_lower)
+    has_numbers = bool(re.search(r'\d+(?:\.\d+)?(?:\s*[gmkl%°CF])?', text))
+    has_structure = "\n" in text and len(text.split("\n")) > 3
+    
+    return keyword_count >= 1 and has_numbers and has_structure
+
+
+def parse_table_rows(text: str) -> List[str]:
+    """Extract rows from table"""
+    lines = text.strip().split('\n')
+    rows = []
+    
+    for line in lines:
+        stripped = line.strip()
+        if stripped and len(stripped) > 5:
+            rows.append(stripped)
+    
+    return rows
+
+
+def compare_table_rows(rows_a: List[str], rows_b: List[str]) -> str:
+    """Compare tables row by row, highlight changed rows"""
+    result_lines = []
+    matched_b = set()
+    
+    for row_a in rows_a:
+        best_match_idx = None
+        
+        for idx, row_b in enumerate(rows_b):
+            if idx in matched_b:
+                continue
+            
+            # Extract numbers and labels
+            nums_a = re.findall(r'\d+(?:\.\d+)?', row_a)
+            nums_b = re.findall(r'\d+(?:\.\d+)?', row_b)
+            
+            label_a = re.sub(r'\d+(?:\.\d+)?', '', row_a).strip()
+            label_b = re.sub(r'\d+(?:\.\d+)?', '', row_b).strip()
+            
+            if label_a == label_b:
+                if nums_a != nums_b:
+                    # Row changed - highlight it
+                    result_lines.append(
+                        f'<span style="background:#fef2f2;padding:6px 4px;border-left:4px solid #dc2626;display:block;margin:2px 0;">'
+                        f'{row_b}'
+                        f'</span>'
+                    )
+                else:
+                    # Row unchanged
+                    result_lines.append(f'<span style="padding:6px 4px;display:block;margin:2px 0;">{row_b}</span>')
+                
+                matched_b.add(idx)
+                best_match_idx = idx
+                break
+        
+        if best_match_idx is None:
+            result_lines.append(
+                f'<span style="background:#fee2e2;padding:6px 4px;border-left:4px solid #dc2626;display:block;margin:2px 0;">'
+                f'❌ {row_a}'
+                f'</span>'
+            )
+    
+    # Added rows
+    for idx, row_b in enumerate(rows_b):
+        if idx not in matched_b:
+            result_lines.append(
+                f'<span style="background:#d1fae5;padding:6px 4px;border-left:4px solid #10b981;display:block;margin:2px 0;">'
+                f'✨ {row_b}'
+                f'</span>'
+            )
+    
+    return ''.join(result_lines)
+
+
+def highlight_diff(text_a: str, text_b: str) -> str:
+    """Create HTML with highlighting. Handle tables row-by-row."""
+    if text_a == text_b:
+        return text_b  # No changes
+
+    # Check if this is a table
+    if is_table_block(text_b):
+        rows_a = parse_table_rows(text_a)
+        rows_b = parse_table_rows(text_b)
+        return compare_table_rows(rows_a, rows_b)
+    
+    # Regular text comparison
     matcher = SequenceMatcher(None, text_a, text_b)
     result = []
 
@@ -252,10 +346,8 @@ def highlight_diff(text_a: str, text_b: str) -> str:
         if tag == 'equal':
             result.append(chunk_b)
         elif tag == 'replace' or tag == 'insert':
-            # This part changed or was added
             result.append(f'<mark style="background:#fbbf24;font-weight:bold;padding:2px 3px;border-radius:2px;">{chunk_b}</mark>')
         elif tag == 'delete':
-            # Deleted from A, not in B - skip
             pass
 
     html = ''.join(result)
