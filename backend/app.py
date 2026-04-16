@@ -1,8 +1,7 @@
 """
-Packaging PDF Comparison & Audit API - EXPLICIT V2 TEXT
-
-Guarantees full V2 content in every row with highlighting.
-No missing data. No truncation. Clear ACTION items.
+Packaging PDF Comparison - STABLE VERSION
+Back to simple, reliable extraction + Infallible Mode
+No over-engineered table detection - just works.
 """
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ app = Flask(__name__)
 CORS(app)
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("pdf_audit")
+logger = logging.getLogger("pdf_audit_stable")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -50,11 +49,11 @@ class MatchResult:
 
 
 # ============================================================================
-# TEXT EXTRACTION
+# TEXT EXTRACTION - SIMPLE & RELIABLE
 # ============================================================================
 
 def extract_text(file_storage) -> str:
-    """Extract ALL text from PDF. No truncation."""
+    """Extract ALL text from PDF. Simple, no tricks."""
     try:
         if hasattr(file_storage, "seek"):
             file_storage.seek(0)
@@ -76,92 +75,8 @@ def extract_text(file_storage) -> str:
 # SEGMENTATION - SIMPLE & RELIABLE
 # ============================================================================
 
-def extract_nutrition_table(text: str) -> Optional[Tuple[str, str, str]]:
-    """
-    Extract complete NUTRITION table block.
-    Returns: (before_table, table_block, after_table)
-    """
-    lines = text.split('\n')
-    nutrition_start = None
-    nutrition_end = None
-    
-    # Find NUTRITION start
-    for i, line in enumerate(lines):
-        if 'nutrition' in line.lower() and line.strip():
-            nutrition_start = i
-            break
-    
-    if nutrition_start is None:
-        return None
-    
-    # Find where table ends
-    # Table ends when we hit: blank line + non-numeric line (like "This pack contains")
-    in_table = False
-    for i in range(nutrition_start, len(lines)):
-        line = lines[i].strip()
-        
-        # Start of table content (after "NUTRITION" header)
-        if i > nutrition_start and (line and any(c.isdigit() for c in line)):
-            in_table = True
-        
-        # End of table: blank line followed by text without numbers
-        if in_table and not line:
-            # Check next non-blank line
-            j = i + 1
-            while j < len(lines) and not lines[j].strip():
-                j += 1
-            
-            if j < len(lines):
-                next_line = lines[j].strip().lower()
-                # Check if it's NOT table-related
-                if not any(x in next_line for x in ['energy', 'protein', 'fat', 'carb', 'waitrose.com']):
-                    nutrition_end = i
-                    break
-    
-    if nutrition_end is None:
-        nutrition_end = len(lines)
-    
-    before = '\n'.join(lines[:nutrition_start])
-    table = '\n'.join(lines[nutrition_start:nutrition_end])
-    after = '\n'.join(lines[nutrition_end:])
-    
-    return (before, table, after)
-
-
 def segment_text(text: str) -> List[Segment]:
-    """Split into sections - extract NUTRITION table as atomic block."""
-    if not text or len(text) < 20:
-        return []
-
-    # First: extract NUTRITION table if it exists
-    nutrition_extract = extract_nutrition_table(text)
-    
-    segments = []
-    remaining_text = text
-    
-    if nutrition_extract:
-        before, nutrition_table, after = nutrition_extract
-        
-        # Process text BEFORE table
-        if before.strip():
-            segments.extend(_segment_text_block(before))
-        
-        # Add table as atomic block
-        if nutrition_table.strip():
-            segments.append(Segment(type="NUTRITION", content=nutrition_table.strip()))
-        
-        # Process text AFTER table
-        if after.strip():
-            segments.extend(_segment_text_block(after))
-    else:
-        # No nutrition table found, segment normally
-        segments = _segment_text_block(text)
-    
-    return segments
-
-
-def _segment_text_block(text: str) -> List[Segment]:
-    """Helper: segment a text block into sections."""
+    """Split into sections. Keep all content intact."""
     if not text or len(text) < 20:
         return []
 
@@ -169,6 +84,7 @@ def _segment_text_block(text: str) -> List[Segment]:
         "PRODUCT_NAME": ["product", "brand", "name"],
         "INGREDIENTS": ["ingredients:", "composition", "contains:"],
         "ALLERGY_ADVICE": ["allergy advice:", "for allergens", "may contain"],
+        "NUTRITION": ["nutrition", "energy", "per 100g", "typical values", "kcal"],
         "COOKING": ["oven cook", "gas", "chilled", "preparation:", "preheat"],
         "STORAGE": ["storage:", "keep refrigerated", "store", "temperature"],
         "WARNING": ["warning:", "contains alcohol"],
@@ -220,11 +136,11 @@ def _segment_text_block(text: str) -> List[Segment]:
 
 
 # ============================================================================
-# MATCHING & DIFF
+# MATCHING
 # ============================================================================
 
 def match_segments(segs_a: List[Segment], segs_b: List[Segment]) -> Tuple[List[MatchResult], List[Segment], List[Segment]]:
-    """Match segments and find changes."""
+    """Match segments - simple and reliable."""
     matches = []
     used_b = set()
 
@@ -236,7 +152,6 @@ def match_segments(segs_a: List[Segment], segs_b: List[Segment]) -> Tuple[List[M
             if idx in used_b:
                 continue
 
-            # Score: 70% text similarity + 30% type match
             text_sim = SequenceMatcher(None, seg_a.content.lower(), seg_b.content.lower()).ratio()
             type_match = 1.0 if seg_a.type == seg_b.type else 0.0
             score = (0.7 * text_sim) + (0.3 * type_match)
@@ -259,25 +174,18 @@ def match_segments(segs_a: List[Segment], segs_b: List[Segment]) -> Tuple[List[M
             ))
             used_b.add(best_idx)
 
-    # Find deleted and added
-    deleted = []
-    for idx, seg_a in enumerate(segs_a):
-        is_matched = any(m.seg_a == seg_a for m in matches)
-        if not is_matched:
-            deleted.append(seg_a)
-
-    added = []
-    for idx, seg_b in enumerate(segs_b):
-        is_matched = any(m.seg_b == seg_b for m in matches)
-        if not is_matched:
-            added.append(seg_b)
+    deleted = [s for s in segs_a if not any(m.seg_a == s for m in matches)]
+    added = [segs_b[i] for i in range(len(segs_b)) if i not in used_b]
 
     return matches, deleted, added
 
 
 def find_changes(text_a: str, text_b: str) -> List[str]:
-    """Find exact changes between texts."""
+    """Find exact changes."""
     changes = []
+
+    if text_a == text_b:
+        return []
 
     # Numbers
     nums_a = re.findall(r'\d+(?:\.\d+)?(?:\s*[gmkl%°CF])?', text_a)
@@ -299,15 +207,16 @@ def find_changes(text_a: str, text_b: str) -> List[str]:
     # Words
     words_a = set(text_a.split())
     words_b = set(text_b.split())
+    
     removed = words_a - words_b
     added = words_b - words_a
 
     for w in removed:
-        if len(w) > 2:
+        if len(w) > 2 and w not in ['.', ',', '!', '?']:
             changes.append(f"❌ Removed: '{w}'")
     
     for w in added:
-        if len(w) > 2:
+        if len(w) > 2 and w not in ['.', ',', '!', '?']:
             changes.append(f"✨ Added: '{w}'")
 
     if not changes and text_a != text_b:
@@ -316,106 +225,11 @@ def find_changes(text_a: str, text_b: str) -> List[str]:
     return changes[:5]
 
 
-# ============================================================================
-# TABLE-AWARE COMPARISON
-# ============================================================================
-
-def is_table_block(text: str) -> bool:
-    """Detect if text block is a structured table"""
-    text_lower = text.lower()
-    
-    table_keywords = [
-        "nutrition", "typical values", "per 100g", "per 1/7",
-        "oven cook", "gas", "chilled",
-        "energy", "protein", "fat", "carbohydrate"
-    ]
-    
-    keyword_count = sum(1 for kw in table_keywords if kw in text_lower)
-    has_numbers = bool(re.search(r'\d+(?:\.\d+)?(?:\s*[gmkl%°CF])?', text))
-    has_structure = "\n" in text and len(text.split("\n")) > 3
-    
-    return keyword_count >= 1 and has_numbers and has_structure
-
-
-def parse_table_rows(text: str) -> List[str]:
-    """Extract rows from table"""
-    lines = text.strip().split('\n')
-    rows = []
-    
-    for line in lines:
-        stripped = line.strip()
-        if stripped and len(stripped) > 5:
-            rows.append(stripped)
-    
-    return rows
-
-
-def compare_table_rows(rows_a: List[str], rows_b: List[str]) -> str:
-    """Compare tables row by row, highlight changed rows"""
-    result_lines = []
-    matched_b = set()
-    
-    for row_a in rows_a:
-        best_match_idx = None
-        
-        for idx, row_b in enumerate(rows_b):
-            if idx in matched_b:
-                continue
-            
-            # Extract numbers and labels
-            nums_a = re.findall(r'\d+(?:\.\d+)?', row_a)
-            nums_b = re.findall(r'\d+(?:\.\d+)?', row_b)
-            
-            label_a = re.sub(r'\d+(?:\.\d+)?', '', row_a).strip()
-            label_b = re.sub(r'\d+(?:\.\d+)?', '', row_b).strip()
-            
-            if label_a == label_b:
-                if nums_a != nums_b:
-                    # Row changed - highlight it
-                    result_lines.append(
-                        f'<span style="background:#fef2f2;padding:6px 4px;border-left:4px solid #dc2626;display:block;margin:2px 0;">'
-                        f'{row_b}'
-                        f'</span>'
-                    )
-                else:
-                    # Row unchanged
-                    result_lines.append(f'<span style="padding:6px 4px;display:block;margin:2px 0;">{row_b}</span>')
-                
-                matched_b.add(idx)
-                best_match_idx = idx
-                break
-        
-        if best_match_idx is None:
-            result_lines.append(
-                f'<span style="background:#fee2e2;padding:6px 4px;border-left:4px solid #dc2626;display:block;margin:2px 0;">'
-                f'❌ {row_a}'
-                f'</span>'
-            )
-    
-    # Added rows
-    for idx, row_b in enumerate(rows_b):
-        if idx not in matched_b:
-            result_lines.append(
-                f'<span style="background:#d1fae5;padding:6px 4px;border-left:4px solid #10b981;display:block;margin:2px 0;">'
-                f'✨ {row_b}'
-                f'</span>'
-            )
-    
-    return ''.join(result_lines)
-
-
 def highlight_diff(text_a: str, text_b: str) -> str:
-    """Create HTML with highlighting. Handle tables row-by-row."""
+    """Highlight differences between texts."""
     if text_a == text_b:
-        return text_b  # No changes
+        return text_b
 
-    # Check if this is a table
-    if is_table_block(text_b):
-        rows_a = parse_table_rows(text_a)
-        rows_b = parse_table_rows(text_b)
-        return compare_table_rows(rows_a, rows_b)
-    
-    # Regular text comparison
     matcher = SequenceMatcher(None, text_a, text_b)
     result = []
 
@@ -434,34 +248,25 @@ def highlight_diff(text_a: str, text_b: str) -> str:
 
 
 # ============================================================================
-# REPORT BUILDING
+# REPORT BUILDING - INFALLIBLE MODE
 # ============================================================================
 
 def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[Segment]) -> List[Dict[str, Any]]:
     """
-    Build report rows - INFALLIBLE MODE.
-    
-    SHOW: Only blocks with changes
-    HIDE: Identical blocks (100% match)
-    EVERY CHANGE: Flagged as "QC REVIEW REQUIRED"
-    
-    Trust: No false confidence. If anything is different, QC sees it.
+    Build report - INFALLIBLE MODE.
+    Show ONLY blocks with changes. Hide perfect blocks.
     """
     rows = []
     row_id = 1
-    identical_count = 0  # Track perfect blocks (not shown)
 
-    # Matched sections - ONLY SHOW IF THERE'S A CHANGE
     for match in matches:
         v2_html = highlight_diff(match.seg_a.content, match.seg_b.content)
         
-        # SKIP if 100% identical - QC doesn't need to see it
+        # SKIP if 100% identical
         if match.similarity >= 99.9:
-            identical_count += 1
             continue
         
-        # ANYTHING LESS THAN 100% = QC NEEDS TO REVIEW
-        # No false confidence - even 1 character difference flags it
+        # ANYTHING LESS = QC REVIEW
         status = "CHANGED"
         action = f"🔴 QC REVIEW REQUIRED: {len(match.changes)} change(s)"
         
@@ -478,7 +283,6 @@ def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[S
         })
         row_id += 1
 
-    # Deleted sections - ALWAYS CRITICAL
     for seg in deleted:
         rows.append({
             "row_id": f"R{row_id}",
@@ -493,7 +297,6 @@ def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[S
         })
         row_id += 1
 
-    # Added sections - ALWAYS NEEDS REVIEW
     for seg in added:
         rows.append({
             "row_id": f"R{row_id}",
@@ -517,14 +320,14 @@ def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[S
 
 @app.route("/")
 def home():
-    return jsonify({"status": "API running"})
+    return jsonify({"status": "API running - STABLE VERSION"})
 
 
 @app.route("/compare", methods=["POST"])
 def compare():
     try:
         if "file1" not in request.files or "file2" not in request.files:
-            return jsonify({"error": "Both files required"}), 400
+            return jsonify({"error": "Both PDF files required"}), 400
 
         f1, f2 = request.files["file1"], request.files["file2"]
 
@@ -532,13 +335,13 @@ def compare():
         text_b = extract_text(f2)
 
         if not text_a or not text_b:
-            return jsonify({"error": "Could not extract text"}), 400
+            return jsonify({"error": "Could not extract text from PDFs"}), 400
 
         segs_a = segment_text(text_a)
         segs_b = segment_text(text_b)
 
         if not segs_a or not segs_b:
-            return jsonify({"error": "Could not segment"}), 400
+            return jsonify({"error": "Could not segment text"}), 400
 
         matches, deleted, added = match_segments(segs_a, segs_b)
         rows = build_rows(matches, deleted, added)
@@ -547,7 +350,6 @@ def compare():
             "report": {
                 "comparison_table": rows,
                 "summary": {
-                    "total_rows": len(rows),
                     "total_rows": len(rows),
                     "changed": sum(1 for r in rows if r["status"] == "CHANGED"),
                     "added": sum(1 for r in rows if r["status"] == "ADDED"),
@@ -583,7 +385,6 @@ def summary():
         matches, deleted, added = match_segments(segs_a, segs_b)
         rows = build_rows(matches, deleted, added)
 
-        # Build audit text
         audit_lines = ["QC FINDINGS", "=" * 60]
         for row in rows:
             audit_lines.append(f"\n{row['element']} | {row['status']}")
@@ -597,7 +398,6 @@ def summary():
 
         audit_text = "\n".join(audit_lines)
 
-        # Call OpenAI
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
             "Content-Type": "application/json",
@@ -607,7 +407,7 @@ def summary():
             "model": OPENAI_MODEL,
             "messages": [
                 {"role": "system", "content": "Create QC checklist."},
-                {"role": "user", "content": f"Create checklist:\n{audit_text}"},
+                {"role": "user", "content": f"QC Checklist:\n{audit_text}"},
             ],
             "temperature": 0.2,
             "max_tokens": 2000,
@@ -621,7 +421,7 @@ def summary():
         )
 
         if resp.status_code != 200:
-            return jsonify({"summary": "API error"}), 500
+            return jsonify({"summary": "Summary generation failed"}), 500
 
         summary_text = resp.json()["choices"][0]["message"]["content"]
         return jsonify({"summary": summary_text})
