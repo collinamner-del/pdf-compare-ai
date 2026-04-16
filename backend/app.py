@@ -1,7 +1,7 @@
 """
-Packaging PDF Comparison - ENHANCED VERSION
-Tesseract OCR (industry standard) + SSIM visual comparison (secondary)
-Content-first, visual-aware approach
+Packaging PDF Comparison - STABLE VERSION
+Back to simple, reliable extraction + Infallible Mode
+No over-engineered table detection - just works.
 """
 
 from __future__ import annotations
@@ -9,7 +9,6 @@ from __future__ import annotations
 import os
 import re
 import logging
-import io
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Dict, List, Optional, Tuple, Any
@@ -19,25 +18,11 @@ import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-# Image processing
-from pdf2image import convert_from_bytes
-import cv2
-import numpy as np
-from skimage.metrics import structural_similarity as ssim
-
-# Better OCR - Tesseract
-try:
-    import pytesseract
-    TESSERACT_AVAILABLE = True
-except ImportError:
-    TESSERACT_AVAILABLE = False
-    logging.warning("pytesseract not available - using pdfplumber only")
-
 app = Flask(__name__)
 CORS(app)
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("pdf_audit_enhanced")
+logger = logging.getLogger("pdf_audit_stable")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -64,100 +49,30 @@ class MatchResult:
 
 
 # ============================================================================
-# IMAGE-BASED ANALYSIS (SECONDARY)
+# TEXT EXTRACTION - SIMPLE & RELIABLE
 # ============================================================================
 
-def convert_pdf_to_images(file_bytes: bytes) -> List[np.ndarray]:
-    """Convert PDF to images"""
-    try:
-        images = convert_from_bytes(file_bytes, dpi=150)
-        return [cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY) for img in images]
-    except Exception as e:
-        logger.warning(f"PDF to image conversion failed: {e}")
-        return []
-
-
-def calculate_ssim_diff(img1: np.ndarray, img2: np.ndarray) -> Tuple[float, np.ndarray]:
-    """Calculate structural similarity and get diff"""
-    try:
-        # Ensure same size
-        h, w = min(img1.shape[0], img2.shape[0]), min(img1.shape[1], img2.shape[1])
-        img1_resized = img1[:h, :w]
-        img2_resized = img2[:h, :w]
-        
-        # Calculate SSIM
-        similarity, diff = ssim(img1_resized, img2_resized, full=True)
-        diff = (diff * 255).astype("uint8")
-        
-        return similarity, diff
-    except Exception as e:
-        logger.warning(f"SSIM calculation failed: {e}")
-        return 0.0, None
-
-
-def get_visual_change_percentage(images_a: List[np.ndarray], images_b: List[np.ndarray]) -> float:
-    """Get overall visual change percentage"""
-    if not images_a or not images_b:
-        return 0.0
-    
-    similarities = []
-    for img_a, img_b in zip(images_a[:min(len(images_a), len(images_b))], images_b[:min(len(images_a), len(images_b))]):
-        try:
-            sim, _ = calculate_ssim_diff(img_a, img_b)
-            similarities.append(sim)
-        except:
-            continue
-    
-    if similarities:
-        avg_sim = np.mean(similarities)
-        return round((1 - avg_sim) * 100, 1)
-    return 0.0
-
-
-# ============================================================================
-# ENHANCED OCR EXTRACTION - TESSERACT
-# ============================================================================
-
-def extract_text_enhanced(file_storage) -> str:
-    """Extract text using both pdfplumber and Tesseract for best results"""
+def extract_text(file_storage) -> str:
+    """Extract ALL text from PDF. Simple, no tricks."""
     try:
         if hasattr(file_storage, "seek"):
             file_storage.seek(0)
 
         pages = []
-        
         with pdfplumber.open(file_storage) as pdf:
-            for page_num, page in enumerate(pdf.pages):
-                # Try pdfplumber first (faster, structured)
+            for page in pdf.pages:
                 text = page.extract_text(layout=True) or page.extract_text() or ""
-                
-                # If pdfplumber got little/nothing, try Tesseract
-                if TESSERACT_AVAILABLE and (not text or len(text.strip()) < 50):
-                    try:
-                        logger.info(f"Running Tesseract OCR on page {page_num + 1}")
-                        # Convert page to image and OCR
-                        img = page.to_image()
-                        img_np = cv2.cvtColor(np.array(img.original), cv2.COLOR_RGB2BGR)
-                        
-                        # Use Tesseract with PSM 6 (assume single uniform block of text)
-                        ocr_text = pytesseract.image_to_string(img_np, config='--psm 6')
-                        
-                        if ocr_text.strip():
-                            text = ocr_text if len(ocr_text) > len(text) else text
-                    except Exception as e:
-                        logger.warning(f"Tesseract fallback failed on page {page_num + 1}: {e}")
-                
                 if text.strip():
                     pages.append(text.strip())
 
         return "\n\n".join(pages)
 
     except Exception as exc:
-        raise RuntimeError(f"Text extraction failed: {exc}") from exc
+        raise RuntimeError(f"Extraction failed: {exc}") from exc
 
 
 # ============================================================================
-# SEGMENTATION
+# SEGMENTATION - SIMPLE & RELIABLE
 # ============================================================================
 
 def segment_text(text: str) -> List[Segment]:
@@ -272,6 +187,7 @@ def find_changes(text_a: str, text_b: str) -> List[str]:
     if text_a == text_b:
         return []
 
+    # Numbers
     nums_a = re.findall(r'\d+(?:\.\d+)?(?:\s*[gmkl%°CF])?', text_a)
     nums_b = re.findall(r'\d+(?:\.\d+)?(?:\s*[gmkl%°CF])?', text_b)
     if nums_a != nums_b:
@@ -279,6 +195,7 @@ def find_changes(text_a: str, text_b: str) -> List[str]:
             if na != nb:
                 changes.append(f"⚠️ Value: {na} → {nb}")
 
+    # Punctuation
     a_no_punct = text_a.rstrip('.!?,; ')
     b_no_punct = text_b.rstrip('.!?,; ')
     if a_no_punct == b_no_punct:
@@ -287,6 +204,7 @@ def find_changes(text_a: str, text_b: str) -> List[str]:
         if text_a.endswith(',') != text_b.endswith(','):
             changes.append("⚠️ Comma changed")
 
+    # Words
     words_a = set(text_a.split())
     words_b = set(text_b.split())
     
@@ -330,11 +248,14 @@ def highlight_diff(text_a: str, text_b: str) -> str:
 
 
 # ============================================================================
-# SMART CONTENT RECONCILIATION
+# SMART CONTENT RECONCILIATION - Auto-Fix OCR Issues
 # ============================================================================
 
 def reconcile_misaligned_content(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Global reconciliation: detect when deleted content appears as added"""
+    """
+    Global reconciliation: If deleted content appears as added ANYWHERE,
+    it's an extraction issue - remove both false flags.
+    """
     try:
         deleted_indices = [i for i, r in enumerate(rows) if r.get("status") == "DELETED"]
         added_indices = [i for i, r in enumerate(rows) if r.get("status") == "ADDED"]
@@ -365,6 +286,7 @@ def reconcile_misaligned_content(rows: List[Dict[str, Any]]) -> List[Dict[str, A
                 max_len = max(len(del_words), len(add_words))
                 ratio = overlap / max_len if max_len > 0 else 0
                 
+                # >70% overlap = same content
                 if ratio > 0.70:
                     rows[del_idx]["status"] = "RECONCILED"
                     rows[del_idx]["action"] = "✓ Content reconciled"
@@ -378,28 +300,29 @@ def reconcile_misaligned_content(rows: List[Dict[str, Any]]) -> List[Dict[str, A
                     reconciled.add(add_idx)
                     break
         
+        # Filter out reconciled rows
         return [r for r in rows if r.get("status") != "RECONCILED"]
     
     except Exception as e:
-        logger.warning(f"Reconciliation error: {e}")
+        logger.warning(f"Reconciliation error (continuing): {e}")
         return rows
 
-
-# ============================================================================
-# REPORT BUILDING
-# ============================================================================
-
 def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[Segment]) -> List[Dict[str, Any]]:
-    """Build report - INFALLIBLE MODE"""
+    """
+    Build report - INFALLIBLE MODE.
+    Show ONLY blocks with changes. Hide perfect blocks.
+    """
     rows = []
     row_id = 1
 
     for match in matches:
         v2_html = highlight_diff(match.seg_a.content, match.seg_b.content)
         
+        # SKIP if 100% identical
         if match.similarity >= 99.9:
             continue
         
+        # ANYTHING LESS = QC REVIEW
         status = "CHANGED"
         action = f"🔴 QC REVIEW REQUIRED: {len(match.changes)} change(s)"
         
@@ -453,12 +376,7 @@ def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[S
 
 @app.route("/")
 def home():
-    ocr_status = "✓ Tesseract available" if TESSERACT_AVAILABLE else "⚠️ Tesseract not available (using pdfplumber)"
-    return jsonify({
-        "status": "API running - ENHANCED VERSION",
-        "ocr": ocr_status,
-        "features": ["Enhanced OCR (Tesseract)", "Visual comparison (SSIM)", "Smart reconciliation"]
-    })
+    return jsonify({"status": "API running - STABLE VERSION"})
 
 
 @app.route("/compare", methods=["POST"])
@@ -469,27 +387,8 @@ def compare():
 
         f1, f2 = request.files["file1"], request.files["file2"]
 
-        # Read file bytes
-        f1.seek(0)
-        f2.seek(0)
-        bytes1 = f1.read()
-        bytes2 = f2.read()
-        
-        f1.seek(0)
-        f2.seek(0)
-
-        # Get visual change percentage (secondary info)
-        visual_change = 0.0
-        try:
-            images_a = convert_pdf_to_images(bytes1)
-            images_b = convert_pdf_to_images(bytes2)
-            visual_change = get_visual_change_percentage(images_a, images_b)
-        except Exception as e:
-            logger.warning(f"Visual analysis failed: {e}")
-
-        # Extract text with enhanced OCR
-        text_a = extract_text_enhanced(f1)
-        text_b = extract_text_enhanced(f2)
+        text_a = extract_text(f1)
+        text_b = extract_text(f2)
 
         if not text_a or not text_b:
             return jsonify({"error": "Could not extract text from PDFs"}), 400
@@ -502,6 +401,8 @@ def compare():
 
         matches, deleted, added = match_segments(segs_a, segs_b)
         rows = build_rows(matches, deleted, added)
+        
+        # Smart QC: auto-fix OCR misalignment
         rows = reconcile_misaligned_content(rows)
 
         return jsonify({
@@ -514,19 +415,14 @@ def compare():
                     "deleted": sum(1 for r in rows if r["status"] == "DELETED"),
                     "blocks_checked": len(matches),
                     "blocks_perfect": sum(1 for m in matches if m.similarity >= 99.9),
-                },
-                "visual_analysis": {
-                    "layout_change_percent": visual_change,
-                    "note": "Secondary metric - content changes are primary"
+                    "auto_fixed": sum(1 for r in rows if r.get("action", "").startswith("✓ AUTO-FIXED")),
                 }
             }
         })
 
     except Exception as exc:
         logger.exception("Compare failed")
-        error_msg = f"{type(exc).__name__}: {str(exc)}"
-        logger.error(f"Full error: {error_msg}")
-        return jsonify({"error": error_msg, "type": type(exc).__name__}), 500
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.route("/summary", methods=["POST"])
@@ -537,8 +433,8 @@ def summary():
 
         f1, f2 = request.files["file1"], request.files["file2"]
 
-        text_a = extract_text_enhanced(f1)
-        text_b = extract_text_enhanced(f2)
+        text_a = extract_text(f1)
+        text_b = extract_text(f2)
 
         if not text_a or not text_b:
             return jsonify({"error": "Could not extract text"}), 400
@@ -548,6 +444,8 @@ def summary():
 
         matches, deleted, added = match_segments(segs_a, segs_b)
         rows = build_rows(matches, deleted, added)
+        
+        # Smart QC: auto-fix OCR misalignment
         rows = reconcile_misaligned_content(rows)
 
         audit_lines = ["QC FINDINGS", "=" * 60]
