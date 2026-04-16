@@ -524,7 +524,9 @@ def compare():
 
     except Exception as exc:
         logger.exception("Compare failed")
-        return jsonify({"error": str(exc)}), 500
+        error_msg = f"{type(exc).__name__}: {str(exc)}"
+        logger.error(f"Full error: {error_msg}")
+        return jsonify({"error": error_msg, "type": type(exc).__name__}), 500
 
 
 @app.route("/summary", methods=["POST"])
