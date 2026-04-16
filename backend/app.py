@@ -1,10 +1,9 @@
 """
-Packaging PDF Comparison - SPATIAL BOUNDING BOX GROUPING
+Packaging PDF Comparison - PRO VERSION
+Optimized extraction + intelligent grouping + character-level diffs
 
-Groups text blocks by spatial position (x,y coordinates) instead of
-text similarity. Handles multi-column layouts perfectly.
-
-This is a NEW file - your current app.py stays untouched.
+Uses multiple extraction methods, context-aware type detection,
+and semantic similarity for bulletproof text matching.
 """
 
 from __future__ import annotations
@@ -13,6 +12,7 @@ import os
 import re
 import logging
 from dataclasses import dataclass
+from difflib import SequenceMatcher, ndiff
 from typing import Dict, List, Optional, Tuple, Any
 
 import pdfplumber
@@ -24,7 +24,7 @@ app = Flask(__name__)
 CORS(app)
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("pdf_audit_spatial")
+logger = logging.getLogger("pdf_audit_pro")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -37,261 +37,301 @@ OPENAI_TIMEOUT = int(os.getenv("OPENAI_TIMEOUT", "45"))
 
 @dataclass
 class Block:
-    """Text block with spatial position"""
+    """Text block with type and content"""
     text: str
-    x0: float
-    y0: float
-    x1: float
-    y1: float
-    block_type: str = "GENERAL"
-    
-    @property
-    def center_y(self) -> float:
-        return (self.y0 + self.y1) / 2
-    
-    @property
-    def center_x(self) -> float:
-        return (self.x0 + self.x1) / 2
+    block_type: str
+    source_lines: int = 1
 
 
 @dataclass
 class BlockMatch:
     block_a: Block
     block_b: Block
-    changes: List[str]
     similarity: float
+    changes: List[str]
+    highlighted: str
 
 
 # ============================================================================
-# TEXT EXTRACTION - GET CHARS WITH POSITIONS
+# EXTRACTION - Multiple Methods, Best Result
 # ============================================================================
 
-def extract_text_with_positions(file_storage) -> List[Dict[str, Any]]:
-    """Extract words with their bounding boxes (x0, y0, x1, y1)"""
+def extract_text_best_effort(file_storage) -> str:
+    """
+    Try multiple extraction methods, return the best result.
+    Handles various PDF formats reliably.
+    """
     try:
         if hasattr(file_storage, "seek"):
             file_storage.seek(0)
 
-        words = []
+        best_text = ""
+        
         with pdfplumber.open(file_storage) as pdf:
             for page_num, page in enumerate(pdf.pages, start=1):
+                page_text = ""
+                
+                # Method 1: Layout mode (preserves structure)
                 try:
-                    # Extract words with bounding boxes
-                    page_words = page.extract_words(x_tolerance=3, y_tolerance=3)
-                    
-                    if page_words:
-                        for word in page_words:
-                            if all(key in word for key in ["text", "x0", "y0", "x1", "y1"]):
-                                words.append({
-                                    "text": word["text"],
-                                    "x0": float(word["x0"]),
-                                    "y0": float(word["y0"]),
-                                    "x1": float(word["x1"]),
-                                    "y1": float(word["y1"]),
-                                    "page": page_num,
-                                })
-                except Exception as page_exc:
-                    logger.warning(f"Page {page_num} extraction issue: {page_exc}")
-                    continue
-
-        if not words:
-            raise RuntimeError("No text extracted from PDFs")
-
-        return words
+                    text = page.extract_text(layout=True)
+                    if text and len(text.strip()) > len(page_text):
+                        page_text = text
+                except:
+                    pass
+                
+                # Method 2: Standard extraction
+                if not page_text or len(page_text.strip()) < 50:
+                    try:
+                        text = page.extract_text()
+                        if text and len(text.strip()) > len(page_text):
+                            page_text = text
+                    except:
+                        pass
+                
+                # Method 3: Fallback - extract words
+                if not page_text or len(page_text.strip()) < 50:
+                    try:
+                        words = page.extract_words()
+                        if words:
+                            page_text = " ".join([w.get("text", "") for w in words])
+                    except:
+                        pass
+                
+                if page_text:
+                    best_text += page_text + "\n\n"
+        
+        return best_text.strip() if best_text else ""
 
     except Exception as exc:
         raise RuntimeError(f"Text extraction failed: {exc}") from exc
 
 
 # ============================================================================
-# SPATIAL CLUSTERING - GROUP BY POSITION
+# INTELLIGENT SEGMENTATION - Line-Based Grouping
 # ============================================================================
 
-def cluster_blocks_by_position(chars: List[Dict[str, Any]]) -> List[Block]:
+class IntelligentSegmenter:
     """
-    Group characters into blocks using spatial clustering.
-    Characters close together (same line, nearby columns) = same block.
-    Handles edge cases and malformed PDFs gracefully.
+    Groups text into blocks using:
+    1. Line breaks & whitespace (structural)
+    2. Type detection (context-aware)
+    3. Content patterns (what packaging typically has)
     """
-    if not chars or len(chars) < 2:
-        return []
 
-    blocks = []
-    used = set()
+    PACKAGING_TYPES = {
+        "PRODUCT_NAME": {
+            "patterns": [r"^[A-Z][A-Za-z\s&\-]{5,80}$"],
+            "position": "early",  # Usually near top
+            "length_range": (6, 100),
+        },
+        "INGREDIENTS": {
+            "patterns": [
+                r"ingredient",
+                r"composition",
+                r"contain",
+                r"made from",
+            ],
+            "indicators": ["milk", "sugar", "cocoa", "water", "salt", "%"],
+            "position": "early-middle",
+        },
+        "NUTRITION": {
+            "patterns": [r"nutrition", r"energy", r"protein", r"fat", r"carb"],
+            "indicators": ["kcal", "kj", "g", "per 100", "0%"],
+            "position": "middle",
+        },
+        "ALLERGENS": {
+            "patterns": [r"allerg", r"may contain", r"contain"],
+            "indicators": ["nut", "milk", "sesame", "soy", "egg", "gluten"],
+            "position": "middle-late",
+        },
+        "STORAGE": {
+            "patterns": [r"stor", r"keep", r"best before", r"use by", r"refrigerat"],
+            "indicators": ["temperature", "dry", "cool", "°c", "°f"],
+            "position": "late",
+        },
+        "INSTRUCTIONS": {
+            "patterns": [r"instruction", r"direction", r"preparation", r"cook", r"method"],
+            "indicators": ["heat", "mix", "serve", "add", "water"],
+            "position": "late",
+        },
+        "COMPANY": {
+            "patterns": [r"made by", r"produced", r"manufacturer", r"distributor"],
+            "indicators": ["ltd", "inc", "corp", "gmbh", "address"],
+            "position": "end",
+        },
+    }
 
-    # Sort by Y position (top to bottom), then X (left to right)
-    try:
-        sorted_chars = sorted(chars, key=lambda c: (round(c.get("y0", 0), 1), c.get("x0", 0)))
-    except Exception as e:
-        logger.warning(f"Sorting failed: {e}. Using unsorted list.")
-        sorted_chars = chars
+    @classmethod
+    def segment(cls, text: str) -> List[Block]:
+        """Segment text into intelligent blocks"""
+        if not text or len(text) < 20:
+            return []
 
-    for idx, char in enumerate(sorted_chars):
-        if idx in used:
-            continue
+        lines = text.split('\n')
+        blocks = []
+        current_block_lines = []
+        current_type = "GENERAL"
 
-        # Validate char has required fields
-        if not all(key in char for key in ["text", "x0", "y0", "x1", "y1"]):
-            used.add(idx)
-            continue
+        for line_idx, line in enumerate(lines):
+            stripped = line.strip()
+            
+            # Empty line = block boundary
+            if not stripped:
+                if current_block_lines:
+                    block_text = '\n'.join(current_block_lines).strip()
+                    if len(block_text) > 5:
+                        detected_type = cls._detect_type(block_text)
+                        blocks.append(Block(
+                            text=block_text,
+                            block_type=detected_type,
+                            source_lines=len(current_block_lines),
+                        ))
+                    current_block_lines = []
+                    current_type = "GENERAL"
+                continue
+            
+            # Check if this line starts a new section
+            detected = cls._detect_type(stripped)
+            if detected and detected != "GENERAL" and current_block_lines:
+                # Save previous block
+                block_text = '\n'.join(current_block_lines).strip()
+                if len(block_text) > 5:
+                    blocks.append(Block(
+                        text=block_text,
+                        block_type=current_type,
+                        source_lines=len(current_block_lines),
+                    ))
+                current_block_lines = [line]
+                current_type = detected
+            else:
+                current_block_lines.append(line)
 
-        # Start a new block with this character
-        block_chars = [char]
-        used.add(idx)
+        # Don't forget last block
+        if current_block_lines:
+            block_text = '\n'.join(current_block_lines).strip()
+            if len(block_text) > 5:
+                blocks.append(Block(
+                    text=block_text,
+                    block_type=current_type,
+                    source_lines=len(current_block_lines),
+                ))
+
+        return blocks
+
+    @classmethod
+    def _detect_type(cls, text: str) -> str:
+        """Detect block type using patterns + indicators + context"""
+        text_lower = text.lower()
         
-        # Find all characters that belong to this block
-        y_min = char.get("y0", 0) - 5
-        y_max = char.get("y1", 0) + 5
-        last_x1 = char.get("x1", 0)
+        # Strong pattern matches
+        for block_type, config in cls.PACKAGING_TYPES.items():
+            for pattern in config.get("patterns", []):
+                if re.search(pattern, text_lower):
+                    # Confirm with indicators if available
+                    indicators = config.get("indicators", [])
+                    if not indicators:
+                        return block_type
+                    
+                    # Check if any indicators present
+                    if any(ind in text_lower for ind in indicators):
+                        return block_type
 
-        for idx2, char2 in enumerate(sorted_chars):
-            if idx2 in used:
-                continue
-            
-            # Validate char2
-            if not all(key in char2 for key in ["text", "x0", "y0", "x1", "y1"]):
-                continue
-            
-            # Same line?
-            char2_y0 = char2.get("y0", 0)
-            char2_y1 = char2.get("y1", 0)
-            if y_min <= char2_y0 <= y_max or y_min <= char2_y1 <= y_max:
-                # And roughly same X area (same horizontal zone)?
-                char2_x0 = char2.get("x0", 0)
-                if abs(char2_x0 - last_x1) < 50:  # 50px tolerance
-                    block_chars.append(char2)
-                    used.add(idx2)
-                    last_x1 = char2.get("x1", 0)
+        # Short text at start = probably product name
+        if len(text) < 50 and len(text.split('\n')[0]) < 40:
+            return "PRODUCT_NAME"
 
-        # Create block from grouped characters
-        if block_chars:
-            text = " ".join([c.get("text", "") for c in block_chars]).strip()
-            
-            if not text:
-                continue
-            
-            try:
-                x_coords = [c.get("x0", 0) for c in block_chars] + [c.get("x1", 0) for c in block_chars]
-                y_coords = [c.get("y0", 0) for c in block_chars] + [c.get("y1", 0) for c in block_chars]
-
-                block = Block(
-                    text=text,
-                    x0=min(x_coords) if x_coords else 0,
-                    y0=min(y_coords) if y_coords else 0,
-                    x1=max(x_coords) if x_coords else 0,
-                    y1=max(y_coords) if y_coords else 0,
-                    block_type=detect_block_type(text),
-                )
-                
-                # Only keep blocks with meaningful content
-                if len(text.strip()) > 5:
-                    blocks.append(block)
-            except Exception as e:
-                logger.warning(f"Block creation error: {e}")
-                continue
-
-    return blocks
-
-
-def detect_block_type(text: str) -> str:
-    """Detect what type of section this block is"""
-    text_lower = text.lower()
-    
-    if any(kw in text_lower for kw in ["ingredient", "composition"]):
-        return "INGREDIENTS"
-    elif any(kw in text_lower for kw in ["nutrition", "energy", "per 100"]):
-        return "NUTRITION"
-    elif any(kw in text_lower for kw in ["allerg", "may contain", "nut", "milk"]):
-        return "ALLERGENS"
-    elif any(kw in text_lower for kw in ["stor", "keep", "best before", "use by"]):
-        return "STORAGE"
-    elif any(kw in text_lower for kw in ["instruction", "direction", "cook", "prepare"]):
-        return "INSTRUCTIONS"
-    elif any(kw in text_lower for kw in ["made by", "produced", "manufacturer"]):
-        return "COMPANY"
-    elif len(text) < 30:
-        return "PRODUCT_NAME"
-    
-    return "GENERAL"
+        return "GENERAL"
 
 
 # ============================================================================
-# MATCHING - BY POSITION (X, Y COORDINATES)
+# MATCHING - Semantic Similarity
 # ============================================================================
 
-def match_blocks_by_position(blocks_a: List[Block], blocks_b: List[Block]) -> Tuple[List[BlockMatch], List[Block], List[Block]]:
-    """
-    Match blocks across PDFs using spatial position.
-    Blocks at similar Y position = match.
-    """
+def match_blocks(blocks_a: List[Block], blocks_b: List[Block]) -> Tuple[List[BlockMatch], List[Block], List[Block]]:
+    """Match blocks using semantic similarity + type matching"""
     matches = []
     used_b = set()
 
     for block_a in blocks_a:
-        best_idx_b = None
-        best_distance = float('inf')
+        best_idx = None
+        best_score = 0.0
 
         for idx_b, block_b in enumerate(blocks_b):
             if idx_b in used_b:
                 continue
 
-            # Distance metric: Y position is primary (vertical stack)
-            # X position is secondary (left/right columns)
-            y_distance = abs(block_a.center_y - block_b.center_y)
-            x_distance = abs(block_a.center_x - block_b.center_x) * 0.2  # Weight less
+            # Similarity: 60% text, 40% type match
+            text_sim = semantic_similarity(block_a.text, block_b.text)
+            type_match = 1.0 if block_a.block_type == block_b.block_type else 0.5
 
-            distance = y_distance + x_distance
+            score = (0.6 * text_sim) + (0.4 * type_match)
 
-            # Prefer matches within same general area (< 50 pixels Y distance)
-            if distance < best_distance and y_distance < 50:
-                best_distance = distance
-                best_idx_b = idx_b
+            if score > best_score and score >= 0.50:  # Lower threshold for flexibility
+                best_score = score
+                best_idx = idx_b
 
-        if best_idx_b is not None:
-            block_b = blocks_b[best_idx_b]
-            changes = find_changes(block_a.text, block_b.text)
+        if best_idx is not None:
+            block_b = blocks_b[best_idx]
+            changes = find_exact_changes(block_a.text, block_b.text)
             similarity = text_similarity(block_a.text, block_b.text)
+            highlighted = highlight_differences(block_a.text, block_b.text)
             
             matches.append(BlockMatch(
                 block_a=block_a,
                 block_b=block_b,
-                changes=changes,
                 similarity=similarity,
+                changes=changes,
+                highlighted=highlighted,
             ))
-            used_b.add(best_idx_b)
+            used_b.add(best_idx)
 
-    # Find unmatched (deleted/added)
-    deleted = []
-    for block_a in blocks_a:
-        if not any(m.block_a == block_a for m in matches):
-            deleted.append(block_a)
-
-    added = []
-    for idx_b, block_b in enumerate(blocks_b):
-        if idx_b not in used_b:
-            added.append(block_b)
+    # Deleted & added
+    deleted = [b for b in blocks_a if not any(m.block_a == b for m in matches)]
+    added = [b for b in blocks_b if blocks_b.index(b) not in used_b]
 
     return matches, deleted, added
 
 
-def text_similarity(text_a: str, text_b: str) -> float:
-    """Calculate similarity percentage"""
-    from difflib import SequenceMatcher
+def semantic_similarity(text_a: str, text_b: str) -> float:
+    """
+    Better similarity that considers:
+    - Text overlap
+    - Length difference
+    - Content relevance
+    """
     ratio = SequenceMatcher(None, text_a.lower(), text_b.lower()).ratio()
+    
+    # Penalize huge length differences
+    len_a, len_b = len(text_a), len(text_b)
+    len_penalty = 1.0
+    if max(len_a, len_b) > 0:
+        len_ratio = min(len_a, len_b) / max(len_a, len_b)
+        if len_ratio < 0.7:
+            len_penalty = len_ratio
+
+    return ratio * len_penalty
+
+
+def text_similarity(text_a: str, text_b: str) -> float:
+    """Simple percentage similarity"""
+    ratio = SequenceMatcher(None, text_a, text_b).ratio()
     return round(ratio * 100, 1)
 
 
-def find_changes(text_a: str, text_b: str) -> List[str]:
-    """Find exact changes between texts"""
+def find_exact_changes(text_a: str, text_b: str) -> List[str]:
+    """Find EXACT, human-readable changes"""
     changes = []
 
-    # Numbers
+    if text_a == text_b:
+        return []
+
+    # Numbers changed
     nums_a = re.findall(r'\d+(?:\.\d+)?(?:\s*[gmkl%°CF])?', text_a)
     nums_b = re.findall(r'\d+(?:\.\d+)?(?:\s*[gmkl%°CF])?', text_b)
-    if nums_a != nums_b:
-        for na, nb in zip(nums_a, nums_b):
-            if na != nb:
-                changes.append(f"⚠️ Value: {na} → {nb}")
+    
+    for na, nb in zip(nums_a, nums_b):
+        if na != nb:
+            changes.append(f"⚠️ Value: {na} → {nb}")
 
     # Punctuation
     a_clean = text_a.rstrip('.!?,; ')
@@ -302,18 +342,19 @@ def find_changes(text_a: str, text_b: str) -> List[str]:
         if text_a.endswith(',') != text_b.endswith(','):
             changes.append("⚠️ Comma changed")
 
-    # Words
+    # Words added/removed
     words_a = set(text_a.split())
     words_b = set(text_b.split())
+    
     removed = words_a - words_b
     added = words_b - words_a
 
     for w in removed:
-        if len(w) > 2:
+        if len(w) > 2 and w not in ['.', ',', '!', '?']:
             changes.append(f"❌ Removed: '{w}'")
     
     for w in added:
-        if len(w) > 2:
+        if len(w) > 2 and w not in ['.', ',', '!', '?']:
             changes.append(f"✨ Added: '{w}'")
 
     if not changes and text_a != text_b:
@@ -322,13 +363,13 @@ def find_changes(text_a: str, text_b: str) -> List[str]:
     return changes[:5]
 
 
-def highlight_changes(text_a: str, text_b: str) -> str:
-    """Create HTML highlighting differences"""
-    from difflib import SequenceMatcher
-    
+def highlight_differences(text_a: str, text_b: str) -> str:
+    """Character-level highlighting"""
     if text_a == text_b:
         return text_b
 
+    from difflib import SequenceMatcher
+    
     matcher = SequenceMatcher(None, text_a, text_b)
     result = []
 
@@ -339,8 +380,6 @@ def highlight_changes(text_a: str, text_b: str) -> str:
             result.append(chunk)
         elif tag == 'replace' or tag == 'insert':
             result.append(f'<mark style="background:#fbbf24;font-weight:bold;padding:2px 3px;">{chunk}</mark>')
-        elif tag == 'delete':
-            pass
 
     return ''.join(result) if result else text_b
 
@@ -349,8 +388,8 @@ def highlight_changes(text_a: str, text_b: str) -> str:
 # REPORT BUILDING
 # ============================================================================
 
-def build_report_rows(matches: List[BlockMatch], deleted: List[Block], added: List[Block]) -> List[Dict[str, Any]]:
-    """Build report rows for display"""
+def build_report(matches: List[BlockMatch], deleted: List[Block], added: List[Block]) -> List[Dict[str, Any]]:
+    """Build professional report rows"""
     rows = []
     row_id = 1
 
@@ -365,14 +404,12 @@ def build_report_rows(matches: List[BlockMatch], deleted: List[Block], added: Li
             status = "SIGNIFICANT"
             action = f"🔴 CHECK: {len(match.changes)} significant change(s)"
 
-        html = highlight_changes(match.block_a.text, match.block_b.text)
-
         rows.append({
             "row_id": f"R{row_id}",
             "element": match.block_a.block_type,
             "pdf_a": match.block_a.text,
             "pdf_b": match.block_b.text,
-            "pdf_b_html": html,
+            "pdf_b_html": match.highlighted,
             "status": status,
             "similarity": match.similarity,
             "action": action,
@@ -417,36 +454,36 @@ def build_report_rows(matches: List[BlockMatch], deleted: List[Block], added: Li
 
 @app.route("/")
 def home():
-    return jsonify({"status": "API running - SPATIAL GROUPING VERSION"})
+    return jsonify({"status": "API running - PRO VERSION"})
 
 
 @app.route("/compare", methods=["POST"])
 def compare():
     try:
         if "file1" not in request.files or "file2" not in request.files:
-            return jsonify({"error": "Both files required"}), 400
+            return jsonify({"error": "Both PDF files required"}), 400
 
         f1, f2 = request.files["file1"], request.files["file2"]
 
-        # Extract with positions
-        chars_a = extract_text_with_positions(f1)
-        chars_b = extract_text_with_positions(f2)
+        # Extract text with best effort
+        text_a = extract_text_best_effort(f1)
+        text_b = extract_text_best_effort(f2)
 
-        if not chars_a or not chars_b:
-            return jsonify({"error": "Could not extract text"}), 400
+        if not text_a or not text_b:
+            return jsonify({"error": "Could not extract text from PDFs"}), 400
 
-        # Cluster into blocks by spatial position
-        blocks_a = cluster_blocks_by_position(chars_a)
-        blocks_b = cluster_blocks_by_position(chars_b)
+        # Intelligent segmentation
+        blocks_a = IntelligentSegmenter.segment(text_a)
+        blocks_b = IntelligentSegmenter.segment(text_b)
 
         if not blocks_a or not blocks_b:
-            return jsonify({"error": "Could not create blocks"}), 400
+            return jsonify({"error": "Could not segment text"}), 400
 
-        # Match by position
-        matches, deleted, added = match_blocks_by_position(blocks_a, blocks_b)
+        # Match & compare
+        matches, deleted, added = match_blocks(blocks_a, blocks_b)
 
-        # Build rows
-        rows = build_report_rows(matches, deleted, added)
+        # Build report
+        rows = build_report(matches, deleted, added)
 
         return jsonify({
             "report": {
@@ -475,19 +512,19 @@ def summary():
 
         f1, f2 = request.files["file1"], request.files["file2"]
 
-        chars_a = extract_text_with_positions(f1)
-        chars_b = extract_text_with_positions(f2)
+        text_a = extract_text_best_effort(f1)
+        text_b = extract_text_best_effort(f2)
 
-        if not chars_a or not chars_b:
+        if not text_a or not text_b:
             return jsonify({"error": "Could not extract text"}), 400
 
-        blocks_a = cluster_blocks_by_position(chars_a)
-        blocks_b = cluster_blocks_by_position(chars_b)
+        blocks_a = IntelligentSegmenter.segment(text_a)
+        blocks_b = IntelligentSegmenter.segment(text_b)
 
-        matches, deleted, added = match_blocks_by_position(blocks_a, blocks_b)
-        rows = build_report_rows(matches, deleted, added)
+        matches, deleted, added = match_blocks(blocks_a, blocks_b)
+        rows = build_report(matches, deleted, added)
 
-        # Build audit text
+        # Build audit
         audit_lines = ["QC FINDINGS"]
         for row in rows:
             audit_lines.append(f"\n{row['element']} | {row['status']}")
@@ -500,7 +537,7 @@ def summary():
 
         audit_text = "\n".join(audit_lines)
 
-        # Call OpenAI
+        # OpenAI
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
             "Content-Type": "application/json",
@@ -510,7 +547,7 @@ def summary():
             "model": OPENAI_MODEL,
             "messages": [
                 {"role": "system", "content": "Create QC checklist."},
-                {"role": "user", "content": f"QC Checklist from audit:\n{audit_text}"},
+                {"role": "user", "content": f"QC Checklist:\n{audit_text}"},
             ],
             "temperature": 0.2,
             "max_tokens": 2000,
@@ -524,7 +561,7 @@ def summary():
         )
 
         if resp.status_code != 200:
-            return jsonify({"summary": "Could not generate summary"}), 500
+            return jsonify({"summary": "Summary generation failed"}), 500
 
         summary_text = resp.json()["choices"][0]["message"]["content"]
         return jsonify({"summary": summary_text})
