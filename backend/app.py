@@ -267,31 +267,39 @@ def highlight_diff(text_a: str, text_b: str) -> str:
 # ============================================================================
 
 def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[Segment]) -> List[Dict[str, Any]]:
-    """Build report rows. EXPLICIT V2 CONTENT."""
+    """
+    Build report rows - INFALLIBLE MODE.
+    
+    SHOW: Only blocks with changes
+    HIDE: Identical blocks (100% match)
+    EVERY CHANGE: Flagged as "QC REVIEW REQUIRED"
+    
+    Trust: No false confidence. If anything is different, QC sees it.
+    """
     rows = []
     row_id = 1
+    identical_count = 0  # Track perfect blocks (not shown)
 
-    # Matched sections
+    # Matched sections - ONLY SHOW IF THERE'S A CHANGE
     for match in matches:
         v2_html = highlight_diff(match.seg_a.content, match.seg_b.content)
         
-        # Determine status
-        if match.similarity >= 99:
-            status = "IDENTICAL"
-            action = "✓ Verified - no changes"
-        elif match.similarity >= 95:
-            status = "MINOR"
-            action = f"⚠️ QC REVIEW: {len(match.changes)} change(s)"
-        else:
-            status = "SIGNIFICANT"
-            action = f"🔴 QC REVIEW REQUIRED: {len(match.changes)} change(s)"
-
+        # SKIP if 100% identical - QC doesn't need to see it
+        if match.similarity >= 99.9:
+            identical_count += 1
+            continue
+        
+        # ANYTHING LESS THAN 100% = QC NEEDS TO REVIEW
+        # No false confidence - even 1 character difference flags it
+        status = "CHANGED"
+        action = f"🔴 QC REVIEW REQUIRED: {len(match.changes)} change(s)"
+        
         rows.append({
             "row_id": f"R{row_id}",
             "element": match.seg_a.type,
             "pdf_a": match.seg_a.content,
-            "pdf_b": match.seg_b.content,  # FULL V2 TEXT
-            "pdf_b_html": v2_html,  # HIGHLIGHTED V2 TEXT
+            "pdf_b": match.seg_b.content,
+            "pdf_b_html": v2_html,
             "status": status,
             "similarity": round(match.similarity, 1),
             "action": action,
@@ -299,7 +307,7 @@ def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[S
         })
         row_id += 1
 
-    # Deleted sections
+    # Deleted sections - ALWAYS CRITICAL
     for seg in deleted:
         rows.append({
             "row_id": f"R{row_id}",
@@ -309,12 +317,12 @@ def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[S
             "pdf_b_html": "<strong style='color:#dc2626;'>❌ DELETED</strong>",
             "status": "DELETED",
             "similarity": 0.0,
-            "action": "🔴 QC CRITICAL: Section removed - verify intentional",
-            "changes": ["Entire section removed"],
+            "action": "🔴 QC CRITICAL: Section removed",
+            "changes": ["Entire section deleted"],
         })
         row_id += 1
 
-    # Added sections
+    # Added sections - ALWAYS NEEDS REVIEW
     for seg in added:
         rows.append({
             "row_id": f"R{row_id}",
@@ -324,8 +332,8 @@ def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[S
             "pdf_b_html": f"<mark style='background:#bbf7d0;padding:3px 5px;border-radius:3px;'>{seg.content}</mark>",
             "status": "ADDED",
             "similarity": 0.0,
-            "action": "⚠️ QC REVIEW: New section added - verify correct",
-            "changes": ["New section added"],
+            "action": "🔴 QC REVIEW: New section added",
+            "changes": ["New section"],
         })
         row_id += 1
 
@@ -369,11 +377,12 @@ def compare():
                 "comparison_table": rows,
                 "summary": {
                     "total_rows": len(rows),
-                    "identical": sum(1 for r in rows if r["status"] == "IDENTICAL"),
-                    "minor": sum(1 for r in rows if r["status"] == "MINOR"),
-                    "significant": sum(1 for r in rows if r["status"] == "SIGNIFICANT"),
+                    "total_rows": len(rows),
+                    "changed": sum(1 for r in rows if r["status"] == "CHANGED"),
                     "added": sum(1 for r in rows if r["status"] == "ADDED"),
                     "deleted": sum(1 for r in rows if r["status"] == "DELETED"),
+                    "blocks_checked": len(matches),
+                    "blocks_perfect": sum(1 for m in matches if m.similarity >= 99.9),
                 }
             }
         })
