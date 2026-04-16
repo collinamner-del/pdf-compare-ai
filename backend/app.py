@@ -81,15 +81,16 @@ def segment_text(text: str) -> List[Segment]:
     if not text or len(text) < 20:
         return []
 
-    # Keywords that mark sections
+    # Keywords that mark sections (Waitrose-specific)
     section_keywords = {
         "PRODUCT_NAME": ["product", "brand", "name"],
-        "INGREDIENTS": ["ingredient", "composition"],
-        "NUTRITION": ["nutrition", "energy", "per 100"],
-        "ALLERGENS": ["allerg", "may contain"],
-        "STORAGE": ["stor", "keep", "before"],
-        "INSTRUCTIONS": ["instruction", "direction", "cook"],
-        "COMPANY": ["made by", "produced", "manufacturer"],
+        "INGREDIENTS": ["ingredients:", "composition", "contains:"],
+        "ALLERGY_ADVICE": ["allergy advice:", "for allergens", "may contain"],
+        "NUTRITION": ["nutrition", "energy", "per 100g", "typical values", "kcal"],
+        "COOKING": ["oven cook", "gas", "chilled", "preparation:", "preheat"],
+        "STORAGE": ["storage:", "keep refrigerated", "store", "temperature"],
+        "WARNING": ["warning:", "contains alcohol"],
+        "COMPANY": ["produced for waitrose", "made by", "manufacturer"],
     }
 
     lines = text.split('\n')
