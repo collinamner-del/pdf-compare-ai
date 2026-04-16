@@ -76,17 +76,99 @@ def extract_text(file_storage) -> str:
 # SEGMENTATION - SIMPLE & RELIABLE
 # ============================================================================
 
+def extract_nutrition_table(text: str) -> Optional[Tuple[str, str, str]]:
+    """
+    Extract complete NUTRITION table block.
+    Returns: (before_table, table_block, after_table)
+    """
+    lines = text.split('\n')
+    nutrition_start = None
+    nutrition_end = None
+    
+    # Find NUTRITION start
+    for i, line in enumerate(lines):
+        if 'nutrition' in line.lower() and line.strip():
+            nutrition_start = i
+            break
+    
+    if nutrition_start is None:
+        return None
+    
+    # Find where table ends
+    # Table ends when we hit: blank line + non-numeric line (like "This pack contains")
+    in_table = False
+    for i in range(nutrition_start, len(lines)):
+        line = lines[i].strip()
+        
+        # Start of table content (after "NUTRITION" header)
+        if i > nutrition_start and (line and any(c.isdigit() for c in line)):
+            in_table = True
+        
+        # End of table: blank line followed by text without numbers
+        if in_table and not line:
+            # Check next non-blank line
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            
+            if j < len(lines):
+                next_line = lines[j].strip().lower()
+                # Check if it's NOT table-related
+                if not any(x in next_line for x in ['energy', 'protein', 'fat', 'carb', 'waitrose.com']):
+                    nutrition_end = i
+                    break
+    
+    if nutrition_end is None:
+        nutrition_end = len(lines)
+    
+    before = '\n'.join(lines[:nutrition_start])
+    table = '\n'.join(lines[nutrition_start:nutrition_end])
+    after = '\n'.join(lines[nutrition_end:])
+    
+    return (before, table, after)
+
+
 def segment_text(text: str) -> List[Segment]:
-    """Split into sections. Keep all content intact."""
+    """Split into sections - extract NUTRITION table as atomic block."""
     if not text or len(text) < 20:
         return []
 
-    # Keywords that mark sections (Waitrose-specific)
+    # First: extract NUTRITION table if it exists
+    nutrition_extract = extract_nutrition_table(text)
+    
+    segments = []
+    remaining_text = text
+    
+    if nutrition_extract:
+        before, nutrition_table, after = nutrition_extract
+        
+        # Process text BEFORE table
+        if before.strip():
+            segments.extend(_segment_text_block(before))
+        
+        # Add table as atomic block
+        if nutrition_table.strip():
+            segments.append(Segment(type="NUTRITION", content=nutrition_table.strip()))
+        
+        # Process text AFTER table
+        if after.strip():
+            segments.extend(_segment_text_block(after))
+    else:
+        # No nutrition table found, segment normally
+        segments = _segment_text_block(text)
+    
+    return segments
+
+
+def _segment_text_block(text: str) -> List[Segment]:
+    """Helper: segment a text block into sections."""
+    if not text or len(text) < 20:
+        return []
+
     section_keywords = {
         "PRODUCT_NAME": ["product", "brand", "name"],
         "INGREDIENTS": ["ingredients:", "composition", "contains:"],
         "ALLERGY_ADVICE": ["allergy advice:", "for allergens", "may contain"],
-        "NUTRITION": ["nutrition", "energy", "per 100g", "typical values", "kcal"],
         "COOKING": ["oven cook", "gas", "chilled", "preparation:", "preheat"],
         "STORAGE": ["storage:", "keep refrigerated", "store", "temperature"],
         "WARNING": ["warning:", "contains alcohol"],
@@ -101,7 +183,7 @@ def segment_text(text: str) -> List[Segment]:
     for line in lines:
         stripped = line.strip()
         
-        if not stripped:  # Empty line = boundary
+        if not stripped:
             if current_block:
                 content = '\n'.join(current_block).strip()
                 if len(content) > 10:
@@ -110,7 +192,6 @@ def segment_text(text: str) -> List[Segment]:
                 current_type = "GENERAL"
             continue
 
-        # Detect section type
         line_lower = stripped.lower()
         detected = None
         for section_type, keywords in section_keywords.items():
@@ -122,7 +203,6 @@ def segment_text(text: str) -> List[Segment]:
                 break
 
         if detected and current_block:
-            # Save previous section
             content = '\n'.join(current_block).strip()
             if len(content) > 10:
                 segments.append(Segment(type=current_type, content=content))
@@ -131,7 +211,6 @@ def segment_text(text: str) -> List[Segment]:
         else:
             current_block.append(line)
 
-    # Don't forget last block
     if current_block:
         content = '\n'.join(current_block).strip()
         if len(content) > 10:
@@ -237,12 +316,106 @@ def find_changes(text_a: str, text_b: str) -> List[str]:
     return changes[:5]
 
 
-def highlight_diff(text_a: str, text_b: str) -> str:
-    """Create HTML with highlighting. KEEP ALL V2 TEXT."""
-    if text_a == text_b:
-        return text_b  # No changes, return as-is
+# ============================================================================
+# TABLE-AWARE COMPARISON
+# ============================================================================
 
-    # Mark changed portions
+def is_table_block(text: str) -> bool:
+    """Detect if text block is a structured table"""
+    text_lower = text.lower()
+    
+    table_keywords = [
+        "nutrition", "typical values", "per 100g", "per 1/7",
+        "oven cook", "gas", "chilled",
+        "energy", "protein", "fat", "carbohydrate"
+    ]
+    
+    keyword_count = sum(1 for kw in table_keywords if kw in text_lower)
+    has_numbers = bool(re.search(r'\d+(?:\.\d+)?(?:\s*[gmkl%°CF])?', text))
+    has_structure = "\n" in text and len(text.split("\n")) > 3
+    
+    return keyword_count >= 1 and has_numbers and has_structure
+
+
+def parse_table_rows(text: str) -> List[str]:
+    """Extract rows from table"""
+    lines = text.strip().split('\n')
+    rows = []
+    
+    for line in lines:
+        stripped = line.strip()
+        if stripped and len(stripped) > 5:
+            rows.append(stripped)
+    
+    return rows
+
+
+def compare_table_rows(rows_a: List[str], rows_b: List[str]) -> str:
+    """Compare tables row by row, highlight changed rows"""
+    result_lines = []
+    matched_b = set()
+    
+    for row_a in rows_a:
+        best_match_idx = None
+        
+        for idx, row_b in enumerate(rows_b):
+            if idx in matched_b:
+                continue
+            
+            # Extract numbers and labels
+            nums_a = re.findall(r'\d+(?:\.\d+)?', row_a)
+            nums_b = re.findall(r'\d+(?:\.\d+)?', row_b)
+            
+            label_a = re.sub(r'\d+(?:\.\d+)?', '', row_a).strip()
+            label_b = re.sub(r'\d+(?:\.\d+)?', '', row_b).strip()
+            
+            if label_a == label_b:
+                if nums_a != nums_b:
+                    # Row changed - highlight it
+                    result_lines.append(
+                        f'<span style="background:#fef2f2;padding:6px 4px;border-left:4px solid #dc2626;display:block;margin:2px 0;">'
+                        f'{row_b}'
+                        f'</span>'
+                    )
+                else:
+                    # Row unchanged
+                    result_lines.append(f'<span style="padding:6px 4px;display:block;margin:2px 0;">{row_b}</span>')
+                
+                matched_b.add(idx)
+                best_match_idx = idx
+                break
+        
+        if best_match_idx is None:
+            result_lines.append(
+                f'<span style="background:#fee2e2;padding:6px 4px;border-left:4px solid #dc2626;display:block;margin:2px 0;">'
+                f'❌ {row_a}'
+                f'</span>'
+            )
+    
+    # Added rows
+    for idx, row_b in enumerate(rows_b):
+        if idx not in matched_b:
+            result_lines.append(
+                f'<span style="background:#d1fae5;padding:6px 4px;border-left:4px solid #10b981;display:block;margin:2px 0;">'
+                f'✨ {row_b}'
+                f'</span>'
+            )
+    
+    return ''.join(result_lines)
+
+
+def highlight_diff(text_a: str, text_b: str) -> str:
+    """Create HTML with highlighting. Handle tables row-by-row."""
+    if text_a == text_b:
+        return text_b  # No changes
+
+    # Check if this is a table
+    if is_table_block(text_b):
+        rows_a = parse_table_rows(text_a)
+        rows_b = parse_table_rows(text_b)
+        return compare_table_rows(rows_a, rows_b)
+    
+    # Regular text comparison
     matcher = SequenceMatcher(None, text_a, text_b)
     result = []
 
@@ -252,10 +425,8 @@ def highlight_diff(text_a: str, text_b: str) -> str:
         if tag == 'equal':
             result.append(chunk_b)
         elif tag == 'replace' or tag == 'insert':
-            # This part changed or was added
             result.append(f'<mark style="background:#fbbf24;font-weight:bold;padding:2px 3px;border-radius:2px;">{chunk_b}</mark>')
         elif tag == 'delete':
-            # Deleted from A, not in B - skip
             pass
 
     html = ''.join(result)
@@ -267,31 +438,39 @@ def highlight_diff(text_a: str, text_b: str) -> str:
 # ============================================================================
 
 def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[Segment]) -> List[Dict[str, Any]]:
-    """Build report rows. EXPLICIT V2 CONTENT."""
+    """
+    Build report rows - INFALLIBLE MODE.
+    
+    SHOW: Only blocks with changes
+    HIDE: Identical blocks (100% match)
+    EVERY CHANGE: Flagged as "QC REVIEW REQUIRED"
+    
+    Trust: No false confidence. If anything is different, QC sees it.
+    """
     rows = []
     row_id = 1
+    identical_count = 0  # Track perfect blocks (not shown)
 
-    # Matched sections
+    # Matched sections - ONLY SHOW IF THERE'S A CHANGE
     for match in matches:
         v2_html = highlight_diff(match.seg_a.content, match.seg_b.content)
         
-        # Determine status
-        if match.similarity >= 99:
-            status = "IDENTICAL"
-            action = "✓ Verified - no changes"
-        elif match.similarity >= 95:
-            status = "MINOR"
-            action = f"⚠️ QC REVIEW: {len(match.changes)} change(s)"
-        else:
-            status = "SIGNIFICANT"
-            action = f"🔴 QC REVIEW REQUIRED: {len(match.changes)} change(s)"
-
+        # SKIP if 100% identical - QC doesn't need to see it
+        if match.similarity >= 99.9:
+            identical_count += 1
+            continue
+        
+        # ANYTHING LESS THAN 100% = QC NEEDS TO REVIEW
+        # No false confidence - even 1 character difference flags it
+        status = "CHANGED"
+        action = f"🔴 QC REVIEW REQUIRED: {len(match.changes)} change(s)"
+        
         rows.append({
             "row_id": f"R{row_id}",
             "element": match.seg_a.type,
             "pdf_a": match.seg_a.content,
-            "pdf_b": match.seg_b.content,  # FULL V2 TEXT
-            "pdf_b_html": v2_html,  # HIGHLIGHTED V2 TEXT
+            "pdf_b": match.seg_b.content,
+            "pdf_b_html": v2_html,
             "status": status,
             "similarity": round(match.similarity, 1),
             "action": action,
@@ -299,7 +478,7 @@ def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[S
         })
         row_id += 1
 
-    # Deleted sections
+    # Deleted sections - ALWAYS CRITICAL
     for seg in deleted:
         rows.append({
             "row_id": f"R{row_id}",
@@ -309,12 +488,12 @@ def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[S
             "pdf_b_html": "<strong style='color:#dc2626;'>❌ DELETED</strong>",
             "status": "DELETED",
             "similarity": 0.0,
-            "action": "🔴 QC CRITICAL: Section removed - verify intentional",
-            "changes": ["Entire section removed"],
+            "action": "🔴 QC CRITICAL: Section removed",
+            "changes": ["Entire section deleted"],
         })
         row_id += 1
 
-    # Added sections
+    # Added sections - ALWAYS NEEDS REVIEW
     for seg in added:
         rows.append({
             "row_id": f"R{row_id}",
@@ -324,8 +503,8 @@ def build_rows(matches: List[MatchResult], deleted: List[Segment], added: List[S
             "pdf_b_html": f"<mark style='background:#bbf7d0;padding:3px 5px;border-radius:3px;'>{seg.content}</mark>",
             "status": "ADDED",
             "similarity": 0.0,
-            "action": "⚠️ QC REVIEW: New section added - verify correct",
-            "changes": ["New section added"],
+            "action": "🔴 QC REVIEW: New section added",
+            "changes": ["New section"],
         })
         row_id += 1
 
@@ -369,11 +548,12 @@ def compare():
                 "comparison_table": rows,
                 "summary": {
                     "total_rows": len(rows),
-                    "identical": sum(1 for r in rows if r["status"] == "IDENTICAL"),
-                    "minor": sum(1 for r in rows if r["status"] == "MINOR"),
-                    "significant": sum(1 for r in rows if r["status"] == "SIGNIFICANT"),
+                    "total_rows": len(rows),
+                    "changed": sum(1 for r in rows if r["status"] == "CHANGED"),
                     "added": sum(1 for r in rows if r["status"] == "ADDED"),
                     "deleted": sum(1 for r in rows if r["status"] == "DELETED"),
+                    "blocks_checked": len(matches),
+                    "blocks_perfect": sum(1 for m in matches if m.similarity >= 99.9),
                 }
             }
         })
